@@ -88,6 +88,30 @@ fn read_file(path: &str) -> io::Result<Vec<u8>> {
     Ok(buffer)
 }
 
+fn step_symbol(velocity: u8, probability: u8) -> String {
+    if velocity == 0 {
+        return ".".into();
+    }
+    const LEVELS: &[char] = &['▁', '▃', '▅', '█'];
+    let idx = ((velocity as usize * LEVELS.len()) / 128).min(LEVELS.len() - 1);
+    let ch = LEVELS[idx];
+    // Append a single probability digit similar to the Python/TUI helpers
+    format!("{}{}", ch, probability % 10)
+}
+
+fn render_ascii(steps: &[Step], show_prob: bool) -> String {
+    let mut out = String::new();
+    for (i, st) in steps.iter().enumerate() {
+        if i > 0 {
+            if i % 8 == 0 { out.push('\n'); } else { out.push(' '); }
+        }
+        let sym = if show_prob { step_symbol(st.velocity, st.probability) } else { if st.velocity == 0 { ".".into() } else { "█".into() } };
+        out.push_str(&sym);
+    }
+    out
+}
+
+
 fn main() -> io::Result<()> {
     let file_path = std::env::args().nth(1).expect("Usage: <program> <ncs file>");
     let data = read_file(&file_path)?;
@@ -108,6 +132,25 @@ fn main() -> io::Result<()> {
 
     let drums = DrumData::from_bytes(&data, &offsets)?;
     println!("{:#?}", drums);
+
+    // ASCII output similar to the Python CLI: per track and pattern
+    for t in 0..TRACKS {
+        println!("\n=== DRUM TRACK {} ===", t);
+        for p in 0..PATTERNS {
+            let patt = &drums.tracks[t].patterns[p];
+            let ascii = render_ascii(&patt.steps, true);
+            let label = format!("P{:02}: ", p);
+            let mut lines = ascii.lines();
+            if let Some(first) = lines.next() {
+                println!("{}{}", label, first);
+                let pad = " ".repeat(label.len());
+                for line in lines { println!("{}{}", pad, line); }
+            } else {
+                println!("{}", label);
+            }
+        }
+    }
+
 
     Ok(())
 }
