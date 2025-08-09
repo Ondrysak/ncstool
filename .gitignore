@@ -1,0 +1,44 @@
+# Rust / Cargo
+# Build artifacts
+/target/
+**/target/
+
+# Backups created by rustfmt/rustc
+*.rs.bk
+
+# Coverage and profiling
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+*.gcov
+*.lcov
+/coverage/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Keep Cargo.lock by default (recommended for applications)
+# If this repository contains library crates only, consider ignoring it instead.
+!Cargo.lock
+
+# Editor/IDE
+.vscode/
+.idea/
+*.iml
+*.code-workspace
+
+# OS-specific
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+# Linux
+*~
+
