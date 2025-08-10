@@ -30,7 +30,27 @@ struct DrumTrack {
 #[derive(Debug, Clone)]
 struct DrumData {
     tracks: [DrumTrack; TRACKS],
+
 }
+
+
+
+
+
+
+
+fn render_ascii_bool(steps: &[bool]) -> String {
+    let mut out = String::new();
+    for (i, on) in steps.iter().enumerate() {
+        if i > 0 {
+            if i % 8 == 0 { out.push('\n'); } else { out.push(' '); }
+        }
+        out.push_str(if *on { "█" } else { "." });
+    }
+    out
+}
+
+
 
 #[derive(Debug, Clone)]
 struct Fx {
@@ -63,6 +83,176 @@ impl Fx {
         Ok(fx)
     }
 }
+
+
+#[derive(Debug, Clone)]
+struct Timing {
+    tempo: u8,           // 40..240 BPM (inclusive)
+    swing: u8,           // 20..80 (inclusive)
+    swing_sync_rate: u8, // 0..7
+    spare1: u32,         // must be 0
+    spare2: u32,         // must be 0
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TimingOffsets {
+    tempo: usize,           // +0x34
+    swing: usize,           // +0x35
+    swing_sync_rate: usize, // +0x36
+    spare1: usize,          // +0x38 (u32 LE)
+    spare2: usize,          // +0x3C (u32 LE)
+}
+
+impl Timing {
+    fn from_bytes(data: &[u8], off: &TimingOffsets) -> io::Result<Self> {
+        // Bounds checks
+        for &idx in [off.tempo, off.swing, off.swing_sync_rate].iter() {
+            if idx >= data.len() {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Timing byte offset out of bounds"));
+            }
+        }
+        if off.spare1 + 4 > data.len() || off.spare2 + 4 > data.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Timing dword offset out of bounds"));
+        }
+        let tempo = data[off.tempo];
+        let swing = data[off.swing];
+        let swing_sync_rate = data[off.swing_sync_rate];
+        let spare1 = u32::from_le_bytes([data[off.spare1], data[off.spare1 + 1], data[off.spare1 + 2], data[off.spare1 + 3]]);
+        let spare2 = u32::from_le_bytes([data[off.spare2], data[off.spare2 + 1], data[off.spare2 + 2], data[off.spare2 + 3]]);
+        // Mirror firmware range checks
+        if !(40..=240).contains(&tempo) {
+            eprintln!("[warn] Tempo out of range: {} (expected 40..240)", tempo);
+        }
+        if !(20..=80).contains(&swing) {
+            eprintln!("[warn] Swing out of range: {} (expected 20..80)", swing);
+        }
+        if swing_sync_rate >= 8 {
+            eprintln!("[warn] Swing sync rate out of range: {} (expected 0..7)", swing_sync_rate);
+        }
+        if spare1 != 0 {
+            eprintln!("[warn] Session timing spare1 not set to zero: {}", spare1);
+        }
+        if spare2 != 0 {
+            eprintln!("[warn] Session timing spare2 not set to zero: {}", spare2);
+        }
+        Ok(Timing { tempo, swing, swing_sync_rate, spare1, spare2 })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SceneEntry { start: u8, end: u8, pad: u16 }
+
+#[derive(Debug, Clone)]
+struct Scene { entries: [SceneEntry; 8] }
+
+#[derive(Debug, Clone)]
+struct Scenes { scenes: [Scene; 16] }
+
+#[derive(Debug, Clone, Copy)]
+struct ScenesOffsets {
+    base: usize,          // 0x40
+    scene_stride: usize,  // 0x28
+    entry_stride: usize,  // 4
+}
+
+impl Scenes {
+    fn from_bytes(data: &[u8], off: &ScenesOffsets) -> io::Result<Self> {
+        let mut scenes: [Scene; 16] = unsafe { std::mem::zeroed() };
+        for si in 0..16 {
+            let mut entries: [SceneEntry; 8] = unsafe { std::mem::zeroed() };
+            for ei in 0..8 {
+                let idx = off.base + si * off.scene_stride + ei * off.entry_stride;
+                if idx + 4 > data.len() { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Scenes offset out of bounds")); }
+                let start = data[idx];
+                let end = data[idx + 1];
+                let pad = u16::from_le_bytes([data[idx + 2], data[idx + 3]]);
+                // Mirror key firmware checks
+                if start >= 8 { eprintln!("[warn] Scene {} entry {} start out of range: {}", si, ei, start); }
+                if end >= 8 { eprintln!("[warn] Scene {} entry {} end out of range: {}", si, ei, end); }
+                if end < start { eprintln!("[warn] Scene {} entry {} end < start ({} < {})", si, ei, end, start); }
+                if pad != 0 { eprintln!("[warn] Scene {} entry {} padding not zero: {}", si, ei, pad); }
+                entries[ei] = SceneEntry { start, end, pad };
+            }
+            scenes[si] = Scene { entries };
+        }
+        Ok(Scenes { scenes })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SceneChain { start_scene: u8, end_scene: u8, pad: u16 }
+
+#[derive(Debug, Clone, Copy)]
+struct PatternChainEntry { start: u8, end: u8, pad: u16 }
+
+#[derive(Debug, Clone)]
+struct PatternChains { entries: [PatternChainEntry; 8] }
+
+#[derive(Debug, Clone, Copy)]
+struct ChainOffsets {
+    scene_chain_base: usize,    // 0x2C0 (start,end,pad u16)
+    pattern_chain_base: usize,  // 0x2C4 (array of 8 entries, stride 4)
+    pattern_chain_stride: usize // 4
+}
+
+impl SceneChain {
+    fn from_bytes(data: &[u8], off: &ChainOffsets) -> io::Result<Self> {
+        let b = off.scene_chain_base;
+        if b + 4 > data.len() { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "SceneChain out of bounds")); }
+        let start_scene = data[b];
+        let end_scene = data[b + 1];
+        let pad = u16::from_le_bytes([data[b + 2], data[b + 3]]);
+        if start_scene >= 16 { eprintln!("[warn] Scene chain start out of range: {} (expected 0..15)", start_scene); }
+        if end_scene >= 16 { eprintln!("[warn] Scene chain end out of range: {} (expected 0..15)", end_scene); }
+        if end_scene < start_scene { eprintln!("[warn] Scene chain end < start ({} < {})", end_scene, start_scene); }
+        if pad != 0 { eprintln!("[warn] Scene chain padding not set to 0: {}", pad); }
+        Ok(SceneChain { start_scene, end_scene, pad })
+    }
+}
+
+impl PatternChains {
+    fn from_bytes(data: &[u8], off: &ChainOffsets) -> io::Result<Self> {
+        let mut entries: [PatternChainEntry; 8] = unsafe { std::mem::zeroed() };
+        for i in 0..8 {
+            let idx = off.pattern_chain_base + i * off.pattern_chain_stride;
+            if idx + 4 > data.len() { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "PatternChains out of bounds")); }
+            let start = data[idx];
+            let end = data[idx + 1];
+            let pad = u16::from_le_bytes([data[idx + 2], data[idx + 3]]);
+            if start >= 8 { eprintln!("[warn] Pattern chain {} start out of range: {} (0..7)", i, start); }
+            if end >= 8 { eprintln!("[warn] Pattern chain {} end out of range: {} (0..7)", i, end); }
+            if end < start { eprintln!("[warn] Pattern chain {} end < start ({} < {})", i, end, start); }
+            if pad != 0 { eprintln!("[warn] Pattern chain {} padding not set to 0: {}", i, pad); }
+            entries[i] = PatternChainEntry { start, end, pad };
+        }
+        Ok(PatternChains { entries })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScaleSettings { root: u8, scale_type: u8 }
+
+#[derive(Debug, Clone, Copy)]
+struct ScaleOffsets { root: usize, scale_type: usize }
+
+impl ScaleSettings {
+    fn from_bytes(data: &[u8], off: &ScaleOffsets) -> io::Result<Self> {
+        if off.root >= data.len() || off.scale_type >= data.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Scale offsets out of bounds"));
+        }
+        let root = data[off.root];
+        let scale_type = data[off.scale_type];
+        if root >= 12 { eprintln!("[warn] Scale root out of range: {} (expected 0..11)", root); }
+        if scale_type >= 16 { eprintln!("[warn] Invalid scale type: {} (expected 0..15)", scale_type); }
+        Ok(ScaleSettings { root, scale_type })
+    }
+}
+
+
+
+
+
+
 
 
 impl DrumData {
@@ -121,6 +311,34 @@ fn read_file(path: &str) -> io::Result<Vec<u8>> {
     Ok(buffer)
 }
 
+
+// Simple coverage metric: count bytes we can confidently interpret (validated via firmware)
+// Currently: per-step velocity/probability/choice/mask (4 planes) + 2 FX preset bytes
+fn compute_known_bytes(data: &[u8], off: &Offsets, fx: &FxOffsets) -> usize {
+    let mut known: usize = 0;
+    // Helper to count per-step plane
+    let mut count_plane = |base: usize| {
+        let mut c = 0usize;
+        for t in 0..TRACKS {
+            for p in 0..PATTERNS {
+                for s in 0..STEPS {
+                    let idx = base + t * off.track_stride + p * off.pattern_stride + s;
+                    if idx < data.len() { c += 1; }
+                }
+            }
+        }
+        c
+    };
+    known += count_plane(off.velocity);
+    known += count_plane(off.probability);
+    known += count_plane(off.choice);
+    known += count_plane(off.mask);
+    // FX bytes
+    if fx.delay_preset < data.len() { known += 1; }
+    if fx.reverb_preset < data.len() { known += 1; }
+    known
+}
+
 fn step_symbol(velocity: u8, probability: u8) -> String {
     if velocity == 0 {
         return ".".into();
@@ -163,21 +381,58 @@ fn main() -> io::Result<()> {
         pattern_stride: 0x06A8,
     };
 
-    // FX offsets; validate_fx_presets() shows 1 byte each for delay (0..15) and reverb (0..7)
-    // These offsets are placeholders; adjust once confirmed from the buffer layout.
+    // Offsets from reverse engineering analysis
     let fx_offsets = FxOffsets {
         delay_preset: 0x00026D0E, // (&DAT_ram_00026d0e)[param1]
         reverb_preset: 0x00026D0F, // (&DAT_ram_00026d0f)[param1]
     };
+    let timing_offsets = TimingOffsets { tempo: 0x34, swing: 0x35, swing_sync_rate: 0x36, spare1: 0x38, spare2: 0x3C };
+    let scale_offsets = ScaleOffsets { root: 0x26D0C, scale_type: 0x26D0D };
 
+
+    let timing = Timing::from_bytes(&data, &timing_offsets)?;
+    let scale = ScaleSettings::from_bytes(&data, &scale_offsets)?;
 
     let fx = Fx::from_bytes(&data, &fx_offsets)?;
-    println!("FX: delay_preset={} reverb_preset={}", fx.delay_preset, fx.reverb_preset);
 
     let drums = DrumData::from_bytes(&data, &offsets)?;
-    println!("{:#?}", drums);
 
-    // ASCII output similar to the Python CLI: per track and pattern
+    // Simple coverage metric
+    let known = compute_known_bytes(&data, &offsets, &fx_offsets)
+        + 3  // timing bytes: tempo, swing, swing_sync_rate
+        + 8  // timing dwords: spare1, spare2
+        + (16 * 8 * 4)  // scenes table bytes
+        + 4              // scene chain: start,end,pad u16
+        + (8 * 4);       // pattern chains: 8 entries x 4 bytes
+
+    let total = data.len();
+
+    println!(
+        "Known bytes: {} / {} ({:.2}%) | fields: steps[velocity,probability,choice,mask], fx[delay,reverb], timing[tempo,swing,swing_sync_rate,spare1,spare2], scale[root,type], scenes+chains",
+        known,
+        total,
+        (known as f64) * 100.0 / (total.max(1) as f64)
+    );
+
+    // ASCII/debug header
+    println!("Timing: tempo={} swing={} swing_sync_rate={} spare1={} spare2={}", timing.tempo, timing.swing, timing.swing_sync_rate, timing.spare1, timing.spare2);
+    println!("Scale: root={} type={}", scale.root, scale.scale_type);
+
+    println!("FX: delay_preset={} reverb_preset={}", fx.delay_preset, fx.reverb_preset);
+
+    // Scenes & chains
+    let scenes_offsets = ScenesOffsets { base: 0x40, scene_stride: 0x28, entry_stride: 4 };
+    let _scenes = Scenes::from_bytes(&data, &scenes_offsets)?;
+    let chain_offsets = ChainOffsets { scene_chain_base: 0x2C0, pattern_chain_base: 0x2C4, pattern_chain_stride: 4 };
+    let scene_chain = SceneChain::from_bytes(&data, &chain_offsets)?;
+    let _pattern_chains = PatternChains::from_bytes(&data, &chain_offsets)?;
+    println!("Scenes: 16x8 parsed | SceneChain: {}..{} | PatternChains: 8 entries",
+             scene_chain.start_scene, scene_chain.end_scene);
+
+
+
+
+    // Drums (ASCII)
     for t in 0..TRACKS {
         println!("\n=== DRUM TRACK {} ===", t);
         for p in 0..PATTERNS {
@@ -194,7 +449,6 @@ fn main() -> io::Result<()> {
             }
         }
     }
-
 
     Ok(())
 }
