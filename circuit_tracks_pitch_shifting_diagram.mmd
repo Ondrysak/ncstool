@@ -1,67 +1,67 @@
 graph TD
     %% MIDI Input Layer
-    MIDI[MIDI Input<br/>Channels 2-7<br/>Notes 0-63] --> MIDIHandler[MIDI_HandleMessage<br/>0x8030500]
+    MIDI[MIDI Input Channels 2-7] --> MIDIHandler[MIDI_HandleMessage 0x8030500]
     
     %% MIDI Message Processing
-    MIDIHandler --> |Note On| NoteOn[MIDI_HandleNoteOn<br/>0x802F800]
-    MIDIHandler --> |Note Off| NoteOff[MIDI_HandleNoteOff<br/>0x802F77E]
-    MIDIHandler --> |Program Change| ProgChange[MIDI_HandleProgramChange<br/>0x802FC0C]
+    MIDIHandler --> NoteOn[MIDI_HandleNoteOn 0x802F800]
+    MIDIHandler --> NoteOff[MIDI_HandleNoteOff 0x802F77E]
+    MIDIHandler --> ProgChange[MIDI_HandleProgramChange 0x802FC0C]
     
     %% Track Mapping
-    NoteOn --> TrackMap[Track Mapping<br/>Channel 2-7 → Track 0-5]
-    TrackMap --> DrumEngine[Drum Engine<br/>6 Tracks Total]
+    NoteOn --> TrackMap[Track Mapping Channel to Track ID]
+    TrackMap --> DrumEngine[Drum Engine 6 Tracks]
     
     %% Sample Bank System
-    DrumEngine --> SampleBank[Sample Bank<br/>Per Track]
-    SampleBank --> |Contains| BankStruct[Sample Bank Structure<br/>min_sample: uint8<br/>max_sample: uint8<br/>pitch_table: uint32<br/>sample_data[140]<br/>voice_mapping[140]]
+    DrumEngine --> SampleBank[Sample Bank Per Track]
+    SampleBank --> BankStruct[Sample Bank Structure]
     
     %% Pitch Processing Core
-    DrumEngine --> PitchCalc[DrumSample_GetPitchAdjustedIndex<br/>0x80408C6]
-    PitchCalc --> |Extract bits| PitchBits[pitch_table >> 2*(note%12) & 3]
+    DrumEngine --> PitchCalc[DrumSample_GetPitchAdjustedIndex 0x80408C6]
+    PitchCalc --> PitchBits[Extract Pitch Bits]
     PitchBits --> PitchLogic{Pitch Adjustment}
     
-    PitchLogic --> |00| NoChange[No Change<br/>note = note]
-    PitchLogic --> |01| SemitoneDown[Down Semitone<br/>note = note - 1]
-    PitchLogic --> |10/11| SemitoneUp[Up Semitone<br/>note = note + 1]
+    PitchLogic --> NoChange[No Change]
+    PitchLogic --> SemitoneDown[Down Semitone]
+    PitchLogic --> SemitoneUp[Up Semitone]
     
-    NoChange --> Clamp[Range Clamp<br/>min_sample ≤ note ≤ max_sample]
+    NoChange --> Clamp[Range Clamp]
     SemitoneDown --> Clamp
     SemitoneUp --> Clamp
     
     %% Sample Selection
-    Clamp --> SampleSelect[Select Pre-recorded Sample<br/>From Sample Bank]
-    SampleSelect --> VoiceMap[Voice Mapping<br/>sample_index + 244 → voice_id]
+    Clamp --> SampleSelect[Select Pre-recorded Sample]
+    SampleSelect --> VoiceMap[Voice Mapping]
     
     %% Audio Output
-    VoiceMap --> TriggerVoice[DrumTrack_TriggerNote<br/>0x804B07A]
-    TriggerVoice --> AudioEngine[Audio Engine<br/>Voice Playback]
+    VoiceMap --> TriggerVoice[DrumTrack_TriggerNote 0x804B07A]
+    TriggerVoice --> AudioEngine[Audio Engine Voice Playback]
     
-    %% Sample Flip System (Tracks 5-6)
-    DrumEngine --> |Tracks 5-6| SampleFlip[Sample Flip System]
-    SampleFlip --> FlipPattern[32-bit Flip Pattern<br/>Step-based A/B Selection]
-    FlipPattern --> SampleA[Sample A<br/>Pre-recorded Variant]
-    FlipPattern --> SampleB[Sample B<br/>Pre-recorded Variant]
+    %% Sample Flip System
+    DrumEngine --> SampleFlip[Sample Flip System Tracks 5-6]
+    SampleFlip --> FlipPattern[32-bit Flip Pattern]
+    FlipPattern --> SampleA[Sample A]
+    FlipPattern --> SampleB[Sample B]
     
     %% Initialization System
-    Init[DrumTracks_Initialize<br/>0x8031E24] --> |Setup| DrumEngine
-    Init --> |Configure| SampleBank
+    Init[DrumTracks_Initialize 0x8031E24] --> DrumEngine
+    Init --> SampleBank
     
     %% Event Processing
-    EventProc[DrumTrack_ProcessEvents<br/>0x804B270] --> |Trigger| DrumEngine
-    EventProc --> |Process| SampleFlip
+    EventProc[DrumTrack_ProcessEvents 0x804B270] --> DrumEngine
+    EventProc --> SampleFlip
     
     %% Sample Bank Processing
-    BankProc[DrumSample_ProcessBank<br/>0x804093C] --> |Build| SampleBank
-    BankProc --> |Calculate| PitchTable[Pitch Lookup Table<br/>2 bits per semitone<br/>12 semitones = 24 bits]
+    BankProc[DrumSample_ProcessBank 0x804093C] --> SampleBank
+    BankProc --> PitchTable[Pitch Lookup Table]
     
     %% Memory Layout
-    Memory[Sample Bank Memory<br/>~700 bytes per track] --> |0x0000| Header[Header: 8 bytes<br/>min/max/pitch_table]
-    Memory --> |0x0008| Metadata[Sample Metadata: 560 bytes<br/>140 samples × 4 bytes]
-    Memory --> |0x0238| VoiceTable[Voice Mapping: 140 bytes<br/>sample → voice_id]
-    Memory --> |0x02C4| SampleData[Sample Data Buffers<br/>Pre-recorded audio]
+    Memory[Sample Bank Memory 700 bytes] --> Header[Header 8 bytes]
+    Memory --> Metadata[Sample Metadata 560 bytes]
+    Memory --> VoiceTable[Voice Mapping 140 bytes]
+    Memory --> SampleData[Sample Data Buffers]
     
-    %% Performance Characteristics
-    Performance[Performance<br/>O(1) Lookup Time<br/>No Floating Point<br/>Sub-ms Latency<br/>Real-time Safe]
+    %% Performance
+    Performance[Performance O1 Lookup No Float]
     
     %% Styling
     classDef midiClass fill:#e1f5fe,stroke:#01579b,stroke-width:2px
