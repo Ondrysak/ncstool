@@ -1,0 +1,77 @@
+graph TD
+    %% MIDI Input Layer
+    MIDI[MIDI Input<br/>Channels 2-7<br/>Notes 0-63] --> MIDIHandler[MIDI_HandleMessage<br/>0x8030500]
+    
+    %% MIDI Message Processing
+    MIDIHandler --> |Note On| NoteOn[MIDI_HandleNoteOn<br/>0x802F800]
+    MIDIHandler --> |Note Off| NoteOff[MIDI_HandleNoteOff<br/>0x802F77E]
+    MIDIHandler --> |Program Change| ProgChange[MIDI_HandleProgramChange<br/>0x802FC0C]
+    
+    %% Track Mapping
+    NoteOn --> TrackMap[Track Mapping<br/>Channel 2-7 → Track 0-5]
+    TrackMap --> DrumEngine[Drum Engine<br/>6 Tracks Total]
+    
+    %% Sample Bank System
+    DrumEngine --> SampleBank[Sample Bank<br/>Per Track]
+    SampleBank --> |Contains| BankStruct[Sample Bank Structure<br/>min_sample: uint8<br/>max_sample: uint8<br/>pitch_table: uint32<br/>sample_data[140]<br/>voice_mapping[140]]
+    
+    %% Pitch Processing Core
+    DrumEngine --> PitchCalc[DrumSample_GetPitchAdjustedIndex<br/>0x80408C6]
+    PitchCalc --> |Extract bits| PitchBits[pitch_table >> 2*(note%12) & 3]
+    PitchBits --> PitchLogic{Pitch Adjustment}
+    
+    PitchLogic --> |00| NoChange[No Change<br/>note = note]
+    PitchLogic --> |01| SemitoneDown[Down Semitone<br/>note = note - 1]
+    PitchLogic --> |10/11| SemitoneUp[Up Semitone<br/>note = note + 1]
+    
+    NoChange --> Clamp[Range Clamp<br/>min_sample ≤ note ≤ max_sample]
+    SemitoneDown --> Clamp
+    SemitoneUp --> Clamp
+    
+    %% Sample Selection
+    Clamp --> SampleSelect[Select Pre-recorded Sample<br/>From Sample Bank]
+    SampleSelect --> VoiceMap[Voice Mapping<br/>sample_index + 244 → voice_id]
+    
+    %% Audio Output
+    VoiceMap --> TriggerVoice[DrumTrack_TriggerNote<br/>0x804B07A]
+    TriggerVoice --> AudioEngine[Audio Engine<br/>Voice Playback]
+    
+    %% Sample Flip System (Tracks 5-6)
+    DrumEngine --> |Tracks 5-6| SampleFlip[Sample Flip System]
+    SampleFlip --> FlipPattern[32-bit Flip Pattern<br/>Step-based A/B Selection]
+    FlipPattern --> SampleA[Sample A<br/>Pre-recorded Variant]
+    FlipPattern --> SampleB[Sample B<br/>Pre-recorded Variant]
+    
+    %% Initialization System
+    Init[DrumTracks_Initialize<br/>0x8031E24] --> |Setup| DrumEngine
+    Init --> |Configure| SampleBank
+    
+    %% Event Processing
+    EventProc[DrumTrack_ProcessEvents<br/>0x804B270] --> |Trigger| DrumEngine
+    EventProc --> |Process| SampleFlip
+    
+    %% Sample Bank Processing
+    BankProc[DrumSample_ProcessBank<br/>0x804093C] --> |Build| SampleBank
+    BankProc --> |Calculate| PitchTable[Pitch Lookup Table<br/>2 bits per semitone<br/>12 semitones = 24 bits]
+    
+    %% Memory Layout
+    Memory[Sample Bank Memory<br/>~700 bytes per track] --> |0x0000| Header[Header: 8 bytes<br/>min/max/pitch_table]
+    Memory --> |0x0008| Metadata[Sample Metadata: 560 bytes<br/>140 samples × 4 bytes]
+    Memory --> |0x0238| VoiceTable[Voice Mapping: 140 bytes<br/>sample → voice_id]
+    Memory --> |0x02C4| SampleData[Sample Data Buffers<br/>Pre-recorded audio]
+    
+    %% Performance Characteristics
+    Performance[Performance<br/>O(1) Lookup Time<br/>No Floating Point<br/>Sub-ms Latency<br/>Real-time Safe]
+    
+    %% Styling
+    classDef midiClass fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef coreClass fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef sampleClass fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
+    classDef audioClass fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef memoryClass fill:#fce4ec,stroke:#880e4f,stroke-width:2px
+    
+    class MIDI,MIDIHandler,NoteOn,NoteOff,ProgChange midiClass
+    class PitchCalc,PitchBits,PitchLogic,NoChange,SemitoneDown,SemitoneUp,Clamp coreClass
+    class SampleBank,BankStruct,SampleSelect,SampleFlip,FlipPattern,SampleA,SampleB sampleClass
+    class TriggerVoice,AudioEngine,VoiceMap audioClass
+    class Memory,Header,Metadata,VoiceTable,SampleData memoryClass
