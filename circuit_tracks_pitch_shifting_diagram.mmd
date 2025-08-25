@@ -1,18 +1,29 @@
 graph TD
+    %% System Initialization Layer
+    SystemInit[System Initialization] --> DrumInit[DrumTracks_Initialize 0x8031E24]
+    DrumInit --> ConfigData[Load Configuration Data]
+    ConfigData --> DrumTypeData[Extract Drum Type Index]
+
+    %% Pitch Table Creation
+    DrumTypeData --> PitchTableLookup[Static Pitch Table Array 0x805A3C4]
+    PitchTableLookup --> SetPitchTable[SampleBank_SetPitchTable 0x80408BC]
+    SetPitchTable --> ProcessTable[SampleBank_ProcessPitchTable 0x804093C]
+    ProcessTable --> SampleBank[Sample Bank Per Track]
+
     %% MIDI Input Layer
     MIDI[MIDI Input Channels 2-7] --> MIDIHandler[MIDI_HandleMessage 0x8030500]
-    
+
     %% MIDI Message Processing
     MIDIHandler --> NoteOn[MIDI_HandleNoteOn 0x802F800]
     MIDIHandler --> NoteOff[MIDI_HandleNoteOff 0x802F77E]
     MIDIHandler --> ProgChange[MIDI_HandleProgramChange 0x802FC0C]
-    
+
     %% Track Mapping
     NoteOn --> TrackMap[Track Mapping Channel to Track ID]
     TrackMap --> DrumEngine[Drum Engine 6 Tracks]
     
     %% Sample Bank System
-    DrumEngine --> SampleBank[Sample Bank Per Track]
+    DrumEngine --> SampleBank
     SampleBank --> BankStruct[Sample Bank Structure]
     
     %% Pitch Processing Core
@@ -42,17 +53,23 @@ graph TD
     FlipPattern --> SampleA[Sample A]
     FlipPattern --> SampleB[Sample B]
     
-    %% Initialization System
-    Init[DrumTracks_Initialize 0x8031E24] --> DrumEngine
-    Init --> SampleBank
-    
+    %% Drum Track Group Creation
+    DrumInit --> DrumGroupCreate[DrumTrackGroup_Create 0x80409D0]
+    DrumGroupCreate --> TrackConfig1[Track 1 Config MIDI Note 3]
+    DrumGroupCreate --> TrackConfig2[Track 2 Config MIDI Note 4]
+    DrumGroupCreate --> TrackConfig3[Track 3 Config MIDI Note 5]
+    DrumGroupCreate --> TrackConfig4[Track 4 Config Custom Note]
+    DrumGroupCreate --> TrackConfig5[Track 5 Config Custom Note]
+    DrumGroupCreate --> TrackConfig6[Track 6 Config Custom Note]
+
     %% Event Processing
     EventProc[DrumTrack_ProcessEvents 0x804B270] --> DrumEngine
     EventProc --> SampleFlip
-    
-    %% Sample Bank Processing
-    BankProc[DrumSample_ProcessBank 0x804093C] --> SampleBank
-    BankProc --> PitchTable[Pitch Lookup Table]
+
+    %% Static Data Tables
+    StaticTables[Static Firmware Data] --> PitchTableArray[Pitch Table Array 0x805A3C4]
+    StaticTables --> DrumConfigData[Drum Configuration Data 0x8032744]
+    PitchTableArray --> PitchTable[Pitch Lookup Table 2 bits per semitone]
     
     %% Memory Layout
     Memory[Sample Bank Memory 700 bytes] --> Header[Header 8 bytes]
@@ -64,14 +81,18 @@ graph TD
     Performance[Performance O1 Lookup No Float]
     
     %% Styling
+    classDef initClass fill:#fff9c4,stroke:#f57f17,stroke-width:2px
     classDef midiClass fill:#e1f5fe,stroke:#01579b,stroke-width:2px
     classDef coreClass fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
     classDef sampleClass fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
     classDef audioClass fill:#fff3e0,stroke:#e65100,stroke-width:2px
     classDef memoryClass fill:#fce4ec,stroke:#880e4f,stroke-width:2px
-    
+    classDef staticClass fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
+
+    class SystemInit,DrumInit,ConfigData,DrumTypeData,DrumGroupCreate,TrackConfig1,TrackConfig2,TrackConfig3,TrackConfig4,TrackConfig5,TrackConfig6 initClass
     class MIDI,MIDIHandler,NoteOn,NoteOff,ProgChange midiClass
     class PitchCalc,PitchBits,PitchLogic,NoChange,SemitoneDown,SemitoneUp,Clamp coreClass
     class SampleBank,BankStruct,SampleSelect,SampleFlip,FlipPattern,SampleA,SampleB sampleClass
     class TriggerVoice,AudioEngine,VoiceMap audioClass
     class Memory,Header,Metadata,VoiceTable,SampleData memoryClass
+    class StaticTables,PitchTableArray,DrumConfigData,PitchTableLookup,SetPitchTable,ProcessTable staticClass

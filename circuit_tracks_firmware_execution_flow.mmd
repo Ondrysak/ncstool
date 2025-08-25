@@ -1,0 +1,76 @@
+graph TD
+    A[Reset_handler 0x805c00c] --> B[sub_801BC78 - CPU Setup]
+    A --> C[sub_805B790 - FPU Config]
+    A --> D[sub_805B990 - Init Sequence]
+    
+    D --> E[sub_805B590 - Constructor Loop]
+    D --> F[sub_801D3C8 - System Init]
+    D --> G[sub_8052B50 - Main Entry]
+    
+    F --> H[System_InitSubsystems 0x801e174]
+    H --> I[Memory Allocation]
+    H --> J[Track Initialization]
+    H --> K[Audio Engine Setup]
+    
+    G --> L[MainLoop_SystemManager 0x805767c]
+    
+    L --> M[System_InitializeExtended]
+    L --> N[System_Initialize]
+    L --> O[Main Loop]
+    
+    O --> P[Hardware_Initialize]
+    O --> Q[Process Extended Queue]
+    O --> R[Process Basic Queue]
+    O --> O
+    
+    Q --> S[Queue_HasMessages dword_2000696C]
+    R --> T[Queue_HasMessages dword_20006968]
+    
+    S --> U[MainLoop_ProcessCommands 0x8022ae4]
+    T --> U
+    
+    U --> V[Command Dispatcher]
+    V --> W[Command 0: DrumTrack_IsActive]
+    V --> X[Command 1: Process DrumTrack Op]
+    V --> Y[Command 2: Get DrumTrack Data]
+    V --> Z[Command 3: DrumTrack Config]
+    V --> AA[Command 4: Execute DrumTrack]
+    V --> BB[Command 5: Content Management]
+    V --> CC[Command 6: Content Read]
+    V --> DD[Command 7: Content Write]
+    V --> EE[Command 8: System Operation]
+    V --> FF[Command 9: Process Samples]
+    V --> GG[Command 10: Content ReadWrite]
+    
+    W --> HH[DrumTrack Functions]
+    X --> HH
+    Y --> HH
+    Z --> HH
+    AA --> HH
+    
+    BB --> II[Content Functions]
+    CC --> II
+    DD --> II
+    GG --> II
+    
+    EE --> JJ[System Functions]
+    FF --> KK[Sample Processing]
+    
+    HH --> LL[DrumTrack_SetNote]
+    HH --> MM[DrumTrack_TriggerNote]
+    HH --> NN[DrumTrack_ProcessEvents]
+    
+    II --> OO[File System Operations]
+    II --> PP[Flash_WriteData]
+    
+    JJ --> QQ[Hardware_ProcessInterrupt]
+    JJ --> RR[Timer Functions]
+    
+    KK --> SS[Audio Engine]
+    SS --> TT[DSP_ProcessCallback]
+    SS --> UU[Sample_ValidateWAVFormat]
+    
+    style A fill:#ff9999
+    style L fill:#99ff99
+    style U fill:#9999ff
+    style V fill:#ffff99
