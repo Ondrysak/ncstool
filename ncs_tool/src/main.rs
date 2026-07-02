@@ -587,10 +587,11 @@ fn run_analyze(file_path: &str) -> io::Result<()> {
         + (16 * 8 * 4)  // scenes table
         + 4             // scene chain
         + (8 * 4)       // pattern chains
-        + (2 * 8 * 32 * 28); // synth steps fully typed: 28 bytes/step (stepInfo + 6 notes + reserved)
+        + (2 * 8 * 32 * 28)  // synth steps fully typed: 28 bytes/step
+        + (2 * 8 * 32 * 28); // midi steps fully typed: 28 bytes/step
     let total = data.len();
     println!(
-        "Known bytes: {} / {} ({:.2}%) | typed: timing, synth(stepInfo+notes), drums, scale, fx; legacy: scenes+chains",
+        "Known bytes: {} / {} ({:.2}%) | typed: timing, synth+midi(stepInfo+notes), drums, scale, fx; legacy: scenes+chains",
         known, total, (known as f64) * 100.0 / (total.max(1) as f64)
     );
 
@@ -613,6 +614,14 @@ fn run_analyze(file_path: &str) -> io::Result<()> {
     // ---- synth tracks (NEW: typed) ----
     for (ti, track) in sess.synth.tracks.iter().enumerate() {
         println!("\n=== SYNTH TRACK {} ===", ti);
+        for (pi, pat) in track.patterns.iter().enumerate() {
+            println!("P{:02}: {}", pi, synth_pattern_summary(pat));
+        }
+    }
+
+    // ---- midi tracks (NEW: typed, same shape as synth) ----
+    for (ti, track) in sess.midi.tracks.iter().enumerate() {
+        println!("\n=== MIDI TRACK {} ===", ti);
         for (pi, pat) in track.patterns.iter().enumerate() {
             println!("P{:02}: {}", pi, synth_pattern_summary(pat));
         }

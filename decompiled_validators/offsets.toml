@@ -19,22 +19,34 @@ tempo = 0x34             # range 40..240  (VERIFIED read + range)
 
 [verified.synth_patterns]  # validator f_qt
 # Absolute formula (NO separate base term — matches validator exactly):
-#   step_base = track*25920 + pattern*3240 + step*28
+#   step_base = track*25920 + pattern*3240 + step*28   (synth block base already folded in)
 # All field offsets below are absolute = step_base + <const>.
 track_stride   = 25920   # 0x6540   (2 tracks)
 pattern_stride = 3240    # 0xCA8    (8 patterns)
 step_stride    = 28      # 0x1C     (32 steps)
 notes_per_step = 6
-# stepInfo, absolute = step_base + const:
-stepinfo_probability = 740   # step_base+740 (0x2E4), range 0..63  (VERIFIED 512/512 on Deep.ncs)
-stepinfo_notemask    = 741   # step_base+741, range 0..7           (VERIFIED 512/512)
+# stepInfo (CORRECTED: +740 is the note mask, +741 the probability):
+stepinfo_note_mask   = 740   # step_base+740 (0x2E4), range 0..63; bit N => note slot N present
+                             #   (VERIFIED 512/512: mask bit-count == present-note count)
+stepinfo_probability = 741   # step_base+741, range 0..7  (VERIFIED 512/512)
 # per-note sub-record: 4 bytes, stride 4, note N absolute = step_base + 744 + N*4:
-note_number    = 744     # step_base+744+N*4 +0; 0=empty else 1..139 (Web-IDE confirm pending)
-note_gate      = 745     # +1, VERIFIED 100% in 0..127 on enabled notes
-note_delay     = 746     # +2, VERIFIED 100% (0 in samples)
-note_velocity  = 747     # +3, VERIFIED 100% in 0..127 on enabled notes
-# NOTE: 740 == 0x2E4. The "synth block starts at 0x2E4" and "stepInfo is at +740"
-# are the SAME fact — never add them together.
+note_number    = 744     # +0; 0=empty else 1..139
+note_gate      = 745     # +1, VERIFIED 0..127 on active notes
+note_delay     = 746     # +2
+note_velocity  = 747     # +3, VERIFIED 0..127 on active notes
+# NOTE: 740 == 0x2E4. "synth block at 0x2E4" and "stepInfo at +740" are the SAME
+# fact — never add them together.
+
+[verified.midi_patterns]  # validator f_ep — IDENTICAL shape to synth, relocated
+# step_base = MIDI_BASE + track*25920 + pattern*3240 + step*28
+midi_base      = 0x1A27C  # 107132; block ends 0x26CFC, just before scale @0x26D0C
+track_stride   = 25920
+pattern_stride = 3240
+step_stride    = 28
+notes_per_step = 6
+stepinfo_note_mask   = 0   # MIDI_BASE-relative +0, range 0..63  (VERIFIED 512/512 both files)
+stepinfo_probability = 1   # +1, range 0..7                       (VERIFIED 512/512)
+note_number = 4            # +4 + N*4, then +1 gate / +2 delay / +3 velocity (same as synth)
 
 [verified.drum_patterns]   # validator f_vr: base+track*13632+pattern*1704+step, plane @+52596
 velocity     = 0xCD74    # VERIFIED (index formula matches validator exactly)

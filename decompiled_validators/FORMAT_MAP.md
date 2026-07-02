@@ -77,8 +77,20 @@ p = base + track*25920 + pattern*3240 + step*28;  // 0x6540, 0xCA8, 0x1C
 first field at p[740];                              // synth block base = 0x2E4
 ```
 Loops: `note != 6`, `step != 32`, `pattern != 8`, track `0→1` → **2 tracks × 8 patterns × 32 steps × 6 notes**.
-Step stride **0x1C (28 bytes)**; first checked field `p[740] <= 63` → synth step probability ∈ [0,63].
-Consistency check: `0x2E4 + 2*0x6540 = 0xCD64`, immediately before the drum base 0xCD74. ✓
+Step stride **0x1C (28 bytes)**. Per-step 28-byte record (byte offsets from `p+740`):
+- **+0 `assignedNoteMask`** (range 0..63) — the note loop bit-tests it: `q[740] >> note & 1`.
+  VERIFIED against samples: mask bit-count == present-note count, 512/512.
+- **+1 `probability`** (range 0..7).
+- +2..3 reserved; **+4..27 = 6 notes × {noteNumber, gate, delay, velocity}** (4 bytes each).
+
+> Earlier drafts had +0/+1 swapped (probability/mask). Corrected: `+740` is the
+> mask (it's what the note loop shifts), `+741` is probability.
+
+### MIDI patterns — steps (`f_ep`)  ← same shape as synth, relocated
+Identical geometry to synth (`track*25920 + pattern*3240 + step*28`), block base
+**`0x1A27C` (107132)**; stepInfo `+0` mask (0..63) / `+1` probability (0..7); notes `+4`.
+VERIFIED 512/512 on both samples. Block ends `0x26CFC`, right before scale `0x26D0C`. ✓
+Consistency: synth `0x2E4 + 2*0x6540 = 0xCD64` (before drums 0xCD74). ✓
 
 ---
 

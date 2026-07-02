@@ -49,7 +49,8 @@ impl Timing {
 
 // ---------------- synth / midi patterns (VERIFIED geometry) ----------------
 
-pub const SYNTH_BASE: usize = 0x2E4;
+pub const SYNTH_BASE: usize = 0x2E4;    // absolute offset of synth track0/pat0/step0 stepInfo
+pub const MIDI_BASE: usize = 0x1A27C;   // 107132 — absolute offset of midi stepInfo block
 pub const SYNTH_TRACK_STRIDE: usize = 25_920;
 pub const PATTERN_STRIDE_SYNTH: usize = 3_240;
 pub const STEP_STRIDE: usize = 28;
@@ -70,21 +71,25 @@ impl Note {
     }
 }
 
-/// A synth/midi step: stepInfo (probability + assignedNoteMask) plus up to 6 notes.
+/// A synth/midi step: stepInfo (assignedNoteMask + probability) plus up to 6 notes.
+/// Byte layout (VERIFIED against the validator + samples):
+///   +740 assigned_note_mask (6 bits, range 0..63; bit N => note slot N active)
+///   +741 probability (range 0..7)
 #[derive(Debug, Clone)]
 pub struct MelodicStep {
-    pub probability: u8,      // VERIFIED 0..63
-    pub note_mask: u8,        // VERIFIED 0..7 (bit N => note slot N active)
+    pub note_mask: u8,   // VERIFIED 0..63 (bit N => note slot N present); byte +740
+    pub probability: u8, // VERIFIED 0..7; byte +741
     pub notes: [Note; NOTES_PER_STEP],
 }
 
 impl MelodicStep {
-    fn parse(d: &[u8], step_base: usize) -> io::Result<Self> {
-        let probability = u8_at(d, step_base + 740)?;
-        let note_mask = u8_at(d, step_base + 741)?;
+    /// `field_base` is the absolute offset of this step's stepInfo (note_mask byte).
+    fn parse(d: &[u8], field_base: usize) -> io::Result<Self> {
+        let note_mask = u8_at(d, field_base)?;
+        let probability = u8_at(d, field_base + 1)?;
         let mut notes = [Note { note_number: 0, gate: 0, delay: 0, velocity: 0 }; NOTES_PER_STEP];
         for (n, note) in notes.iter_mut().enumerate() {
-            let b = step_base + 744 + n * 4;
+            let b = field_base + 4 + n * 4;
             *note = Note {
                 note_number: u8_at(d, b)?,
                 gate: u8_at(d, b + 1)?,
@@ -92,7 +97,7 @@ impl MelodicStep {
                 velocity: u8_at(d, b + 3)?,
             };
         }
-        Ok(MelodicStep { probability, note_mask, notes })
+        Ok(MelodicStep { note_mask, probability, notes })
     }
 
     /// Notes the mask marks active.
@@ -111,36 +116,58 @@ pub struct MelodicPattern {
 }
 
 #[derive(Debug, Clone)]
-pub struct SynthTrack {
+pub struct MelodicTrack {
     pub patterns: Vec<MelodicPattern>, // 8
+}
+
+/// Parse a melodic block (synth or midi): 2 tracks x 8 patterns x 32 steps.
+/// `block_base` is the absolute offset of track0/pattern0/step0's stepInfo.
+fn parse_melodic_block(d: &[u8], block_base: usize) -> io::Result<Vec<MelodicTrack>> {
+    const TRACKS: usize = 2;
+    const PATTERNS: usize = 8;
+    const STEPS: usize = 32;
+    let mut tracks = Vec::with_capacity(TRACKS);
+    for t in 0..TRACKS {
+        let mut patterns = Vec::with_capacity(PATTERNS);
+        for p in 0..PATTERNS {
+            let mut steps = Vec::with_capacity(STEPS);
+            for s in 0..STEPS {
+                let field_base =
+                    block_base + t * SYNTH_TRACK_STRIDE + p * PATTERN_STRIDE_SYNTH + s * STEP_STRIDE;
+                steps.push(MelodicStep::parse(d, field_base)?);
+            }
+            patterns.push(MelodicPattern { steps });
+        }
+        tracks.push(MelodicTrack { patterns });
+    }
+    Ok(tracks)
 }
 
 #[derive(Debug, Clone)]
 pub struct SynthData {
-    pub tracks: Vec<SynthTrack>, // 2
+    pub tracks: Vec<MelodicTrack>, // 2
 }
 
 impl SynthData {
     pub const TRACKS: usize = 2;
     pub const PATTERNS: usize = 8;
     pub const STEPS: usize = 32;
-
     pub fn parse(d: &[u8]) -> io::Result<Self> {
-        let mut tracks = Vec::with_capacity(Self::TRACKS);
-        for t in 0..Self::TRACKS {
-            let mut patterns = Vec::with_capacity(Self::PATTERNS);
-            for p in 0..Self::PATTERNS {
-                let mut steps = Vec::with_capacity(Self::STEPS);
-                for s in 0..Self::STEPS {
-                    let step_base =
-                        t * SYNTH_TRACK_STRIDE + p * PATTERN_STRIDE_SYNTH + s * STEP_STRIDE;
-                    steps.push(MelodicStep::parse(d, step_base)?);
-                }
-                patterns.push(MelodicPattern { steps });
-            }
-            tracks.push(SynthTrack { patterns });
-        }
-        Ok(SynthData { tracks })
+        Ok(SynthData { tracks: parse_melodic_block(d, SYNTH_BASE)? })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MidiData {
+    pub tracks: Vec<MelodicTrack>, // 2
+}
+
+impl MidiData {
+    pub const TRACKS: usize = 2;
+    pub const PATTERNS: usize = 8;
+    pub const STEPS: usize = 32;
+    pub fn parse(d: &[u8]) -> io::Result<Self> {
+        Ok(MidiData { tracks: parse_melodic_block(d, MIDI_BASE)? })
     }
 }
 
@@ -224,11 +251,43 @@ pub struct Fx {
 pub struct Session {
     pub timing: Timing,
     pub synth: SynthData,
+    pub midi: MidiData,
     pub drums: DrumData,
     pub scale: Scale,
     pub fx: Fx,
-    // pending: header, scenes, chains, synth/drum/midi tail + automation, midi patterns, track info, octaves
+    // pending: header, scenes, chains, per-pattern tail + automation, track info, octaves
 }
+/// Shared range validation for a melodic block (synth or midi), pushing messages
+/// prefixed with `kind` into `v`. Ranges are the validator's: probability<=7,
+/// note_mask<=63, active-note gate/velocity<=127, note_number 0 or 1..=139.
+fn validate_melodic(kind: &str, tracks: &[MelodicTrack], v: &mut Vec<String>) {
+    for (ti, track) in tracks.iter().enumerate() {
+        for (pi, pat) in track.patterns.iter().enumerate() {
+            for (si, step) in pat.steps.iter().enumerate() {
+                if step.probability > 7 {
+                    v.push(format!("{}[{}][{}].step[{}].probability {} > 7", kind, ti, pi, si, step.probability));
+                }
+                if step.note_mask > 63 {
+                    v.push(format!("{}[{}][{}].step[{}].note_mask {} > 63", kind, ti, pi, si, step.note_mask));
+                }
+                for (ni, note) in step.notes.iter().enumerate() {
+                    if (step.note_mask >> ni) & 1 == 1 {
+                        if note.gate > 127 {
+                            v.push(format!("{}[{}][{}].step[{}].note[{}].gate {} > 127", kind, ti, pi, si, ni, note.gate));
+                        }
+                        if note.velocity > 127 {
+                            v.push(format!("{}[{}][{}].step[{}].note[{}].velocity {} > 127", kind, ti, pi, si, ni, note.velocity));
+                        }
+                        if note.note_number != 0 && !(1..=139).contains(&note.note_number) {
+                            v.push(format!("{}[{}][{}].step[{}].note[{}].note_number {} not 0 or 1..=139", kind, ti, pi, si, ni, note.note_number));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 impl Session {
     pub fn parse(d: &[u8]) -> io::Result<Self> {
@@ -238,6 +297,7 @@ impl Session {
         Ok(Session {
             timing: Timing::parse(d)?,
             synth: SynthData::parse(d)?,
+            midi: MidiData::parse(d)?,
             drums: DrumData::parse(d)?,
             scale: Scale { root: u8_at(d, 0x26D0C)?, scale_type: u8_at(d, 0x26D0D)? },
             fx: Fx { delay_preset: u8_at(d, 0x26D0E)?, reverb_preset: u8_at(d, 0x26D0F)? },
@@ -258,33 +318,8 @@ impl Session {
         if self.fx.delay_preset > 15 {
             v.push(format!("fx.delay_preset {} out of range 0..=15", self.fx.delay_preset));
         }
-        for (ti, track) in self.synth.tracks.iter().enumerate() {
-            for (pi, pat) in track.patterns.iter().enumerate() {
-                for (si, step) in pat.steps.iter().enumerate() {
-                    if step.probability > 63 {
-                        v.push(format!(
-                            "synth[{}][{}].step[{}].probability {} > 63", ti, pi, si, step.probability));
-                    }
-                    if step.note_mask > 7 {
-                        v.push(format!(
-                            "synth[{}][{}].step[{}].note_mask {} > 7", ti, pi, si, step.note_mask));
-                    }
-                    for (ni, note) in step.notes.iter().enumerate() {
-                        if (step.note_mask >> ni) & 1 == 1 {
-                            if note.gate > 127 {
-                                v.push(format!("synth[{}][{}].step[{}].note[{}].gate {} > 127", ti, pi, si, ni, note.gate));
-                            }
-                            if note.velocity > 127 {
-                                v.push(format!("synth[{}][{}].step[{}].note[{}].velocity {} > 127", ti, pi, si, ni, note.velocity));
-                            }
-                            if note.note_number != 0 && !(1..=139).contains(&note.note_number) {
-                                v.push(format!("synth[{}][{}].step[{}].note[{}].note_number {} not 0 or 1..=139", ti, pi, si, ni, note.note_number));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        validate_melodic("synth", &self.synth.tracks, &mut v);
+        validate_melodic("midi", &self.midi.tracks, &mut v);
         // Drum planes: velocity is a 7-bit MIDI value (0..=127). This is the plane
         // `clone` edits, so the gate must cover it. (drumChoice/drumRhythm ranges
         // not yet extracted from the validator -> not asserted here.)
@@ -367,13 +402,13 @@ mod tests {
                     assert_eq!(pat.steps.len(), 32, "{name} t{t} p{p} step count literal");
                     for (s, step) in pat.steps.iter().enumerate() {
                         assert!(
-                            step.probability <= 63,
-                            "{name} t{t} p{p} s{s} probability {} > 63",
+                            step.probability <= 7,
+                            "{name} t{t} p{p} s{s} probability {} > 7",
                             step.probability
                         );
                         assert!(
-                            step.note_mask <= 7,
-                            "{name} t{t} p{p} s{s} note_mask {} > 7",
+                            step.note_mask <= 63,
+                            "{name} t{t} p{p} s{s} note_mask {} > 63",
                             step.note_mask
                         );
                         checked += 1;
@@ -527,7 +562,7 @@ mod tests {
         );
     }
 
-    /// A synth step probability past 63 is flagged, and the message names both
+    /// A synth step probability past 7 is flagged, and the message names both
     /// the field and the limit it violated.
     #[test]
     fn bad_synth_probability_reported() {
@@ -536,23 +571,23 @@ mod tests {
 
         let v = sess.validate();
         assert!(
-            v.iter().any(|m| m.contains("probability") && m.contains("63")),
-            "probability=200 must be reported naming 'probability' and the '63' limit, got {:?}",
+            v.iter().any(|m| m.contains("probability") && m.contains("7")),
+            "probability=200 must be reported naming 'probability' and the '7' limit, got {:?}",
             v
         );
     }
 
-    /// A synth step note_mask past 7 (only 3 bits are valid) is flagged with a
+    /// A synth step note_mask past 63 (6 note-slot bits) is flagged with a
     /// message naming the field.
     #[test]
     fn bad_note_mask_reported() {
         let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
-        sess.synth.tracks[0].patterns[0].steps[0].note_mask = 8;
+        sess.synth.tracks[0].patterns[0].steps[0].note_mask = 64;
 
         let v = sess.validate();
         assert!(
             v.iter().any(|m| m.contains("note_mask")),
-            "note_mask=8 (> 7) must be reported naming note_mask, got {:?}",
+            "note_mask=64 (> 63) must be reported naming note_mask, got {:?}",
             v
         );
     }
@@ -614,5 +649,142 @@ mod tests {
             "fx.delay_preset=16 (> 15) must be reported naming delay_preset, got {:?}",
             delay
         );
+    }
+
+    /// MIDI block geometry decodes to the same 2 tracks / 8 patterns / 32 steps
+    /// (512 steps) as the synth block, and across all 512 steps in BOTH real
+    /// files every step's probability <= 7 and note_mask <= 63. A wrong MIDI_BASE
+    /// or stride would either miscount the geometry or read garbage that blows the
+    /// ranges; a re-swap of the two stepInfo bytes would push probability past 7.
+    #[test]
+    fn midi_geometry_512_and_ranges() {
+        for name in ["Deep.ncs", "Funk.ncs"] {
+            let session = Session::parse(&load(name)).expect("sample must parse");
+            let midi = &session.midi;
+
+            assert_eq!(midi.tracks.len(), 2, "{name} midi track count");
+
+            let mut checked = 0usize;
+            for (t, track) in midi.tracks.iter().enumerate() {
+                assert_eq!(track.patterns.len(), 8, "{name} midi t{t} pattern count");
+                for (p, pat) in track.patterns.iter().enumerate() {
+                    assert_eq!(pat.steps.len(), 32, "{name} midi t{t} p{p} step count");
+                    for (s, step) in pat.steps.iter().enumerate() {
+                        assert!(
+                            step.probability <= 7,
+                            "{name} midi t{t} p{p} s{s} probability {} > 7",
+                            step.probability
+                        );
+                        assert!(
+                            step.note_mask <= 63,
+                            "{name} midi t{t} p{p} s{s} note_mask {} > 63",
+                            step.note_mask
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+            assert_eq!(checked, 512, "{name} expected exactly 512 midi steps");
+        }
+    }
+
+    /// Headline regression guard for the note_mask/probability un-swap. Deep.ncs
+    /// synth track0 pattern0 step0 has note_mask 0x0f (bits 0..3), probability 7,
+    /// and note numbers starting [65, 68, 72, 70, ...]. `active_notes()` yields
+    /// exactly popcount(0x0f) == 4 notes. If the two stepInfo bytes are ever
+    /// re-swapped, note_mask would read 7 (probability's value) and probability
+    /// would read 15 (out of range), reddening the mask, probability, AND count
+    /// assertions at once.
+    #[test]
+    fn synth_stepinfo_semantics_unswapped() {
+        let deep = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        let step = &deep.synth.tracks[0].patterns[0].steps[0];
+
+        assert_eq!(step.note_mask, 0x0f, "synth t0 p0 s0 note_mask");
+        assert_eq!(step.probability, 7, "synth t0 p0 s0 probability");
+
+        assert_eq!(step.notes[0].note_number, 65, "note slot 0 number");
+        assert_eq!(step.notes[1].note_number, 68, "note slot 1 number");
+        assert_eq!(step.notes[2].note_number, 72, "note slot 2 number");
+        assert_eq!(step.notes[3].note_number, 70, "note slot 3 number");
+
+        assert_eq!(
+            step.active_notes().count(),
+            4,
+            "active_notes() must equal popcount(0x0f) == 4"
+        );
+        assert_eq!(
+            step.active_notes().count(),
+            step.note_mask.count_ones() as usize,
+            "active_notes() count must track note_mask popcount"
+        );
+    }
+
+    /// The invariant that PROVED which byte is the mask: for every synth step in
+    /// Deep.ncs, popcount(note_mask) equals the number of present notes (note
+    /// slots with a non-zero note_number). If probability were read as the mask,
+    /// its 0..7 values could not track the present-note counts, so this reddens.
+    #[test]
+    fn mask_bitcount_equals_present_notes() {
+        let deep = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        for (t, track) in deep.synth.tracks.iter().enumerate() {
+            for (p, pat) in track.patterns.iter().enumerate() {
+                for (s, step) in pat.steps.iter().enumerate() {
+                    let present =
+                        step.notes.iter().filter(|n| n.note_number != 0).count();
+                    assert_eq!(
+                        step.note_mask.count_ones() as usize,
+                        present,
+                        "synth t{t} p{p} s{s}: popcount(note_mask={:#04x}) != present notes {}",
+                        step.note_mask,
+                        present
+                    );
+                }
+            }
+        }
+    }
+
+    /// The shared validator now covers the MIDI block. An out-of-range MIDI
+    /// note_mask (64 > 63) and, separately, an out-of-range MIDI probability
+    /// (8 > 7) are each reported with a message that identifies both the MIDI
+    /// plane and the offending field -- proving validate() routes the midi block
+    /// through validate_melodic with the "midi" kind, not just the synth block.
+    #[test]
+    fn midi_validation_reports_bad_values() {
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.midi.tracks[0].patterns[0].steps[0].note_mask = 64;
+        let mask = sess.validate();
+        assert!(
+            mask.iter().any(|m| m.contains("midi") && m.contains("note_mask")),
+            "midi note_mask=64 (> 63) must be reported naming 'midi' and 'note_mask', got {:?}",
+            mask
+        );
+
+        // Reset the mask to a clean value; only probability is now out of range.
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.midi.tracks[0].patterns[0].steps[0].probability = 8;
+        let prob = sess.validate();
+        assert!(
+            prob.iter().any(|m| m.contains("midi") && m.contains("probability")),
+            "midi probability=8 (> 7) must be reported naming 'midi' and 'probability', got {:?}",
+            prob
+        );
+    }
+
+    /// Both real files, whose MIDI blocks are now range-checked alongside the
+    /// synth block, still validate clean. Guards against the added midi coverage
+    /// introducing a spurious violation on genuinely valid sessions.
+    #[test]
+    fn real_files_validate_clean_with_midi() {
+        for name in ["Deep.ncs", "Funk.ncs"] {
+            let session = Session::parse(&load(name)).expect("sample must parse");
+            let violations = session.validate();
+            assert!(
+                violations.is_empty(),
+                "{name} is a real valid session but validate() reported {} violation(s): {:?}",
+                violations.len(),
+                violations
+            );
+        }
     }
 }

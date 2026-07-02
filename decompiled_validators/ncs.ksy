@@ -17,13 +17,9 @@ seq:
   - id: pre_synth
     size: 0x2e4
     doc: header, feature flags, timing, scenes, scene/pattern chains (partially decoded; see instances)
-  - id: synth
-    type: melodic_block(2)
-    doc: 2 synth tracks x 8 patterns x 32 steps (VERIFIED geometry)
-  # After synth comes synth_track_info, then the drum region, midi region, and
-  # global scalars. Those are exposed via `instances` at absolute offsets below
-  # rather than sequentially, to avoid asserting byte-exact tail boundaries we
-  # have not yet verified.
+  # Everything past 0x2E4 (synth, drums, midi, scalars) is exposed via `instances`
+  # at absolute offsets below, rather than sequentially, to avoid asserting
+  # byte-exact tail boundaries not yet verified.
 
 instances:
   # ---- timing (VERIFIED tempo range) ----
@@ -45,6 +41,18 @@ instances:
     pos: 0xcd74
     type: drum_block
     doc: 4 tracks x 8 patterns x 32 steps; velocity plane at 0xCD74
+
+  # ---- synth patterns: VERIFIED base/geometry ----
+  synth:
+    pos: 0x2e4
+    type: melodic_block(2)
+    doc: 2 synth tracks x 8 patterns x 32 steps (stepInfo + 6 notes/step)
+
+  # ---- midi patterns: same shape as synth, relocated (VERIFIED base 0x1A27C) ----
+  midi:
+    pos: 0x1a27c
+    type: melodic_block(2)
+    doc: 2 midi tracks x 8 patterns x 32 steps; identical layout to synth
 
   # ---- global scalars (VERIFIED ranges) ----
   scale_root:
@@ -100,18 +108,20 @@ types:
         size: 3240 - 32 * 28
 
   melodic_step:
-    # 28 bytes per step, laid out: probability(+0), note_mask(+1), reserved(+2..3),
-    # then 6 notes (+4..27). Confirmed byte-exact on Deep.ncs:
+    # 28 bytes per step, laid out: assigned_note_mask(+0), probability(+1),
+    # reserved(+2..3), then 6 notes (+4..27). Confirmed byte-exact on Deep.ncs:
     #   record@740 = 0f 07 0000 | 415c004d | 445c0051 | 485d002a ...
-    #   -> probability=15, note_mask=0x7, note0={65,92,0,77}, ...
-    # (Verified: prob<=63 & mask<=7 for all 512 steps; active-note gate/vel<=127.)
+    #   -> note_mask=0x0f (bits 0..3 => 4 notes present), probability=7,
+    #      note0={65,92,0,77}, note1={68,92,0,81}, note2={72,93,0,42}, note3={70,..}
+    # (Verified: note_mask bit-count == present-note count 512/512; probability<=7.)
     seq:
-      - id: probability
+      - id: assigned_note_mask
         type: u1
+        doc: bit N set => note slot N present
         valid:
           min: 0
           max: 63
-      - id: note_mask
+      - id: probability
         type: u1
         valid:
           min: 0
