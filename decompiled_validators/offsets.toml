@@ -1,0 +1,87 @@
+# NCS format offsets — derived from Novation's validator WASM.
+# File is fixed-size 160780 bytes (0x2740C); whole file validated in place, so
+# validator read-offset == file offset.
+#
+# TWO confidence tiers, kept strictly separate:
+#   [verified.*]  = read from the decompiled validator in THIS analysis AND
+#                   confirmed against test_data/Deep.ncs + Funk.ncs using the
+#                   validator's own range constraints (empirically falsifiable).
+#   [inferred.*]  = taken from the existing ncs_tool/main.rs offsets (consistent
+#                   with samples) but NOT re-derived from the validator here.
+#   [pending.*]   = validator function known, offsets not yet extracted.
+
+file_size = 160780
+
+# ============================ VERIFIED ============================
+
+[verified.timing]        # validator f_ku: reads a[0x34]; (tempo-40)&255<=200
+tempo = 0x34             # range 40..240  (VERIFIED read + range)
+
+[verified.synth_patterns]  # validator f_qt
+# Absolute formula (NO separate base term — matches validator exactly):
+#   step_base = track*25920 + pattern*3240 + step*28
+# All field offsets below are absolute = step_base + <const>.
+track_stride   = 25920   # 0x6540   (2 tracks)
+pattern_stride = 3240    # 0xCA8    (8 patterns)
+step_stride    = 28      # 0x1C     (32 steps)
+notes_per_step = 6
+# stepInfo, absolute = step_base + const:
+stepinfo_probability = 740   # step_base+740 (0x2E4), range 0..63  (VERIFIED 512/512 on Deep.ncs)
+stepinfo_notemask    = 741   # step_base+741, range 0..7           (VERIFIED 512/512)
+# per-note sub-record: 4 bytes, stride 4, note N absolute = step_base + 744 + N*4:
+note_number    = 744     # step_base+744+N*4 +0; 0=empty else 1..139 (Web-IDE confirm pending)
+note_gate      = 745     # +1, VERIFIED 100% in 0..127 on enabled notes
+note_delay     = 746     # +2, VERIFIED 100% (0 in samples)
+note_velocity  = 747     # +3, VERIFIED 100% in 0..127 on enabled notes
+# NOTE: 740 == 0x2E4. The "synth block starts at 0x2E4" and "stepInfo is at +740"
+# are the SAME fact — never add them together.
+
+[verified.drum_patterns]   # validator f_vr: base+track*13632+pattern*1704+step, plane @+52596
+velocity     = 0xCD74    # VERIFIED (index formula matches validator exactly)
+track_stride = 0x3540
+pattern_stride = 0x6A8   # 4 tracks x 8 patterns x 32 steps
+# rhythm/velocity coupling VERIFIED by validator strings (0<->0, nonzero<->nonzero)
+
+[verified.scale]         # validator f_tn: reads a[0x26D0C], <=11
+root = 0x26D0C           # range 0..11  (VERIFIED read + range)
+
+[verified.fx]            # validator f_ln: reads a[0x26D0E], <=15
+delay_preset = 0x26D0E   # range 0..15  (VERIFIED read + range)
+
+# ======================== INFERRED (from main.rs; sample-consistent) ========================
+
+[inferred.timing]
+swing      = 0x35        # range 20..80  (validator strings exist; range not re-derived here)
+swing_sync = 0x36        # range 0..7
+spare1     = 0x38        # u32 must be 0
+spare2     = 0x3C        # u32 must be 0
+
+[inferred.drum_planes]   # 0x20 apart; names from validator strings, offsets from main.rs
+probability = 0xCD94
+drum_choice = 0xCDB4
+drum_rhythm = 0xCDD4
+
+[inferred.scenes]        # validator f_hu exists; geometry from main.rs
+base = 0x40 ; scene_stride = 0x28 ; entry_stride = 4 ; count = 16 ; entries_per = 8
+
+[inferred.chains]        # validators f_cu / f_wt exist; geometry from main.rs
+scene_chain_base   = 0x2C0
+pattern_chain_base = 0x2C4
+pattern_chain_stride = 4
+pattern_chain_count  = 8
+
+[inferred.scale_fx_extra]
+scale_type    = 0x26D0D  # range 0..15
+reverb_preset = 0x26D0F  # range 0..7
+
+# ============================ PENDING (validator known, offsets not extracted) ============================
+# f_kt/f_ft/f_xs/f_ms  synth playbackRange / syncRate / playbackDirection / automation
+# f_ds                 synth_track_info {patch, muteState, sidechainPreset}
+# f_nr/f_dr/f_uq/f_lq   drum  playbackRange / syncRate / direction / automation (per-pattern tail)
+# f_aq / f_pp          drum mute states / default drum choices
+# f_ep f_yo f_qo f_ho f_do   midi patterns (same shape as synth: stepInfo + 6 notes)
+# f_yn                 midi_track_info ; f_cn midi keyboard octaves ; f_tu header/signature/featureFlags
+#
+# Extraction procedure (proven): read the validator fn -> get index formula + range check;
+# then confirm the offset against Deep.ncs/Funk.ncs by requiring ALL elements satisfy the
+# range (e.g. synth stepInfo gave 512/512). A wrong offset fails the range check.
