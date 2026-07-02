@@ -1,6 +1,8 @@
 use std::fs::File;
 use std::io::{self, Read};
 
+mod session;
+
 const TRACKS: usize = 4;
 const PATTERNS: usize = 8;
 const STEPS: usize = 32;
@@ -317,7 +319,7 @@ fn read_file(path: &str) -> io::Result<Vec<u8>> {
 fn compute_known_bytes(data: &[u8], off: &Offsets, fx: &FxOffsets) -> usize {
     let mut known: usize = 0;
     // Helper to count per-step plane
-    let mut count_plane = |base: usize| {
+    let count_plane = |base: usize| {
         let mut c = 0usize;
         for t in 0..TRACKS {
             for p in 0..PATTERNS {
@@ -362,13 +364,47 @@ fn render_ascii(steps: &[Step], show_prob: bool) -> String {
     out
 }
 
+/// ASCII render for typed session drum steps (mirrors render_ascii but on session types).
+fn render_drum_ascii(steps: &[session::DrumStep]) -> String {
+    let mut out = String::new();
+    for (i, st) in steps.iter().enumerate() {
+        if i > 0 {
+            if i % 8 == 0 { out.push('\n'); } else { out.push(' '); }
+        }
+        out.push_str(&step_symbol(st.velocity, st.probability));
+    }
+    out
+}
 
-fn main() -> io::Result<()> {
-    let file_path = std::env::args().nth(1).expect("Usage: <program> <ncs file>");
-    let data = read_file(&file_path)?;
+/// Compact summary of a synth pattern: active step count + the notes on its first active step.
+fn synth_pattern_summary(pattern: &session::MelodicPattern) -> String {
+    let active: Vec<&session::MelodicStep> =
+        pattern.steps.iter().filter(|s| s.note_mask != 0).collect();
+    if active.is_empty() {
+        return "(empty)".to_string();
+    }
+    let first = active[0];
+    let notes: Vec<String> = first
+        .active_notes()
+        .filter(|n| n.is_present())
+        .map(|n| format!("{}", n.note_number))
+        .collect();
+    format!(
+        "{} active step(s); first: notes[{}] vel {} prob {}",
+        active.len(),
+        notes.join(","),
+        first.active_notes().next().map(|n| n.velocity).unwrap_or(0),
+        first.probability
+    )
+}
 
-    // Example offsets, adjust for your NCS layout
-    let offsets = Offsets {
+
+/// Velocity levels for step-character digits `0`..`9` (from README pattern format).
+const VEL_LEVELS: [u8; 10] = [0, 14, 28, 42, 56, 70, 84, 98, 112, 127];
+
+/// Default drum-array offsets observed across multiple Circuit Tracks packs.
+fn default_drum_offsets() -> Offsets {
+    Offsets {
         velocity: 0x0CD74,
         probability: 0x0CD94,
         choice: 0x0CDB4,
@@ -379,48 +415,193 @@ fn main() -> io::Result<()> {
         eq: 0x0CE54,
         track_stride: 0x3540,
         pattern_stride: 0x06A8,
+    }
+}
+
+/// Map a single step character to a velocity (README pattern format).
+fn step_char_to_velocity(c: char) -> io::Result<u8> {
+    match c {
+        'X' => Ok(127),
+        'x' => Ok(32),
+        '.' => Ok(0),
+        '0'..='9' => Ok(VEL_LEVELS[(c as u8 - b'0') as usize]),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid step char '{}': expected 'X', 'x', '.', or '0'-'9'", c),
+        )),
+    }
+}
+
+/// A parsed `track:pattern:steps[:probability]` pattern edit.
+#[derive(Debug, Clone)]
+struct PatternEdit {
+    track: usize,
+    pattern: usize,
+    velocities: Vec<u8>, // one entry per specified step (<= STEPS)
+    probability: Option<u8>,
+}
+
+fn invalid_data(msg: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg)
+}
+
+fn parse_index(s: &str, limit: usize, what: &str) -> io::Result<usize> {
+    let v: usize = s
+        .trim()
+        .parse()
+        .map_err(|_| invalid_data(format!("invalid {} '{}': expected 0..{}", what, s, limit - 1)))?;
+    if v >= limit {
+        return Err(invalid_data(format!("{} {} out of range 0..{}", what, v, limit - 1)));
+    }
+    Ok(v)
+}
+
+fn parse_pattern_edit(spec: &str) -> io::Result<PatternEdit> {
+    let parts: Vec<&str> = spec.splitn(4, ':').collect();
+    if parts.len() < 3 {
+        return Err(invalid_data(format!(
+            "pattern spec '{}' must be track:pattern:steps[:probability]",
+            spec
+        )));
+    }
+    let track = parse_index(parts[0], TRACKS, "track")?;
+    let pattern = parse_index(parts[1], PATTERNS, "pattern")?;
+
+    let steps_str = parts[2];
+    let step_count = steps_str.chars().count();
+    if step_count == 0 {
+        return Err(invalid_data(format!("pattern spec '{}' has no steps", spec)));
+    }
+    if step_count > STEPS {
+        return Err(invalid_data(format!(
+            "too many steps: {} (max {})",
+            step_count, STEPS
+        )));
+    }
+    let velocities = steps_str
+        .chars()
+        .map(step_char_to_velocity)
+        .collect::<io::Result<Vec<u8>>>()?;
+
+    let probability = match parts.get(3) {
+        Some(p) => {
+            let v: u8 = p
+                .trim()
+                .parse()
+                .map_err(|_| invalid_data(format!("invalid probability '{}': expected 0..9", p)))?;
+            if v > 9 {
+                return Err(invalid_data(format!("probability {} out of range 0..9", v)));
+            }
+            Some(v)
+        }
+        None => None,
     };
 
-    // Offsets from reverse engineering analysis
-    let fx_offsets = FxOffsets {
-        delay_preset: 0x00026D0E, // (&DAT_ram_00026d0e)[param1]
-        reverb_preset: 0x00026D0F, // (&DAT_ram_00026d0f)[param1]
-    };
-    let timing_offsets = TimingOffsets { tempo: 0x34, swing: 0x35, swing_sync_rate: 0x36, spare1: 0x38, spare2: 0x3C };
-    let scale_offsets = ScaleOffsets { root: 0x26D0C, scale_type: 0x26D0D };
+    Ok(PatternEdit { track, pattern, velocities, probability })
+}
 
+/// Write an edit's velocity + probability planes into `data`.
+/// Steps beyond the edit's length are left untouched (edit only the given steps).
+fn apply_pattern_edit(data: &mut [u8], off: &Offsets, edit: &PatternEdit) -> io::Result<()> {
+    let base = edit.track * off.track_stride + edit.pattern * off.pattern_stride;
+    let prob = edit.probability.unwrap_or(7); // full-probability default for played hits
+    for (s, &vel) in edit.velocities.iter().enumerate() {
+        let idx = base + s;
+        let v_off = off.velocity + idx;
+        let p_off = off.probability + idx;
+        if v_off >= data.len() || p_off >= data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "edit offset out of bounds (track {}, pattern {}, step {})",
+                    edit.track, edit.pattern, s
+                ),
+            ));
+        }
+        data[v_off] = vel;
+        data[p_off] = if vel > 0 { prob } else { 0 };
+    }
+    Ok(())
+}
 
-    let timing = Timing::from_bytes(&data, &timing_offsets)?;
-    let scale = ScaleSettings::from_bytes(&data, &scale_offsets)?;
+/// Clone `source` into `target`, applying one or more pattern edits.
+fn run_clone(source: &str, target: &str, specs: &[String]) -> io::Result<()> {
+    let mut data = read_file(source)?;
+    let off = default_drum_offsets();
 
-    let fx = Fx::from_bytes(&data, &fx_offsets)?;
+    // Parse everything up front so a bad spec fails before any write.
+    let edits = specs
+        .iter()
+        .map(|s| parse_pattern_edit(s))
+        .collect::<io::Result<Vec<_>>>()?;
 
-    let drums = DrumData::from_bytes(&data, &offsets)?;
+    for edit in &edits {
+        apply_pattern_edit(&mut data, &off, edit)?;
+    }
 
-    // Simple coverage metric
+    // Gate the edit through the typed model: parse the mutated buffer and run a
+    // verified subset of the validator's range checks. Refuse to write on failure.
+    // (Mirrors only the validators we've confirmed, not the full device validator.)
+    let sess = session::Session::parse(&data)?;
+    let violations = sess.validate();
+    if !violations.is_empty() {
+        eprintln!("[error] edited session fails typed validation subset ({} issue(s)):", violations.len());
+        for msg in violations.iter().take(10) {
+            eprintln!("  - {}", msg);
+        }
+        return Err(invalid_data("edited session failed the typed validation subset".into()));
+    }
+
+    std::fs::write(target, &data)?;
+
+    println!("Cloned {} -> {} with {} pattern edit(s):", source, target, edits.len());
+    for edit in &edits {
+        let prob = edit
+            .probability
+            .map(|p| format!(" prob={}", p))
+            .unwrap_or_default();
+        println!(
+            "  track {} pattern {}: {} step(s){}",
+            edit.track,
+            edit.pattern,
+            edit.velocities.len(),
+            prob
+        );
+    }
+    Ok(())
+}
+
+fn run_analyze(file_path: &str) -> io::Result<()> {
+    let data = read_file(file_path)?;
+
+    // Typed model (validator-derived) for timing / synth / drums / scale / fx.
+    let sess = session::Session::parse(&data)?;
+
+    // Coverage metric + scenes/chains still use the legacy structs (Session does
+    // not model those regions yet). Dual-parse is intentional and temporary.
+    let offsets = default_drum_offsets();
+    let fx_offsets = FxOffsets { delay_preset: 0x00026D0E, reverb_preset: 0x00026D0F };
     let known = compute_known_bytes(&data, &offsets, &fx_offsets)
-        + 3  // timing bytes: tempo, swing, swing_sync_rate
-        + 8  // timing dwords: spare1, spare2
-        + (16 * 8 * 4)  // scenes table bytes
-        + 4              // scene chain: start,end,pad u16
-        + (8 * 4);       // pattern chains: 8 entries x 4 bytes
-
+        + 3   // timing bytes
+        + 8   // timing dwords
+        + (16 * 8 * 4)  // scenes table
+        + 4             // scene chain
+        + (8 * 4)       // pattern chains
+        + (2 * 8 * 32 * 28); // synth steps fully typed: 28 bytes/step (stepInfo + 6 notes + reserved)
     let total = data.len();
-
     println!(
-        "Known bytes: {} / {} ({:.2}%) | fields: steps[velocity,probability,choice,mask], fx[delay,reverb], timing[tempo,swing,swing_sync_rate,spare1,spare2], scale[root,type], scenes+chains",
-        known,
-        total,
-        (known as f64) * 100.0 / (total.max(1) as f64)
+        "Known bytes: {} / {} ({:.2}%) | typed: timing, synth(stepInfo+notes), drums, scale, fx; legacy: scenes+chains",
+        known, total, (known as f64) * 100.0 / (total.max(1) as f64)
     );
 
-    // ASCII/debug header
-    println!("Timing: tempo={} swing={} swing_sync_rate={} spare1={} spare2={}", timing.tempo, timing.swing, timing.swing_sync_rate, timing.spare1, timing.spare2);
-    println!("Scale: root={} type={}", scale.root, scale.scale_type);
+    // ---- typed header ----
+    let t = &sess.timing;
+    println!("Timing: tempo={} swing={} swing_sync_rate={} spare1={} spare2={}",
+             t.tempo, t.swing, t.swing_sync_rate, t.spare1, t.spare2);
+    println!("Scale: root={} type={}", sess.scale.root, sess.scale.scale_type);
+    println!("FX: delay_preset={} reverb_preset={}", sess.fx.delay_preset, sess.fx.reverb_preset);
 
-    println!("FX: delay_preset={} reverb_preset={}", fx.delay_preset, fx.reverb_preset);
-
-    // Scenes & chains
+    // ---- scenes & chains (legacy) ----
     let scenes_offsets = ScenesOffsets { base: 0x40, scene_stride: 0x28, entry_stride: 4 };
     let _scenes = Scenes::from_bytes(&data, &scenes_offsets)?;
     let chain_offsets = ChainOffsets { scene_chain_base: 0x2C0, pattern_chain_base: 0x2C4, pattern_chain_stride: 4 };
@@ -429,16 +610,20 @@ fn main() -> io::Result<()> {
     println!("Scenes: 16x8 parsed | SceneChain: {}..{} | PatternChains: 8 entries",
              scene_chain.start_scene, scene_chain.end_scene);
 
+    // ---- synth tracks (NEW: typed) ----
+    for (ti, track) in sess.synth.tracks.iter().enumerate() {
+        println!("\n=== SYNTH TRACK {} ===", ti);
+        for (pi, pat) in track.patterns.iter().enumerate() {
+            println!("P{:02}: {}", pi, synth_pattern_summary(pat));
+        }
+    }
 
-
-
-    // Drums (ASCII)
-    for t in 0..TRACKS {
-        println!("\n=== DRUM TRACK {} ===", t);
-        for p in 0..PATTERNS {
-            let patt = &drums.tracks[t].patterns[p];
-            let ascii = render_ascii(&patt.steps, true);
-            let label = format!("P{:02}: ", p);
+    // ---- drums (typed, ASCII) ----
+    for (ti, track) in sess.drums.tracks.iter().enumerate() {
+        println!("\n=== DRUM TRACK {} ===", ti);
+        for (pi, pat) in track.patterns.iter().enumerate() {
+            let ascii = render_drum_ascii(&pat.steps);
+            let label = format!("P{:02}: ", pi);
             let mut lines = ascii.lines();
             if let Some(first) = lines.next() {
                 println!("{}{}", label, first);
@@ -453,24 +638,39 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+fn print_usage(prog: &str) {
+    eprintln!("Usage:");
+    eprintln!("  {} <file.ncs>                                  analyze a session", prog);
+    eprintln!("  {} clone <src.ncs> <dst.ncs> \"t:p:steps[:prob]\" ...  edit drum patterns", prog);
+}
+
+fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let prog = args.first().map(|s| s.as_str()).unwrap_or("ncs-tui");
+
+    match args.get(1).map(|s| s.as_str()) {
+        Some("clone") => {
+            if args.len() < 5 {
+                print_usage(prog);
+                std::process::exit(2);
+            }
+            run_clone(&args[2], &args[3], &args[4..])
+        }
+        Some(file) => run_analyze(file),
+        None => {
+            print_usage(prog);
+            std::process::exit(2);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn load_drums(path: &str) -> DrumData {
         let data = read_file(path).expect("failed to read test ncs file");
-        let offsets = Offsets {
-            velocity: 0x0CD74,
-            probability: 0x0CD94,
-            choice: 0x0CDB4,
-            mask: 0x0CDD4,
-            pitch: 0x0CDF4,
-            decay: 0x0CE14,
-            distortion: 0x0CE34,
-            eq: 0x0CE54,
-            track_stride: 0x3540,
-            pattern_stride: 0x06A8,
-        };
+        let offsets = default_drum_offsets();
         DrumData::from_bytes(&data, &offsets).expect("parse drums")
     }
 
@@ -503,6 +703,91 @@ mod tests {
         assert!(steps[4].velocity >= 96, "step4 expected strong hit");
         // Bars 3 and 4 (16..31) were rests in Funk P02
         for i in 16..32 { assert_eq!(steps[i].velocity, 0, "expected rest at step {}", i); }
+    }
+
+    #[test]
+    fn step_char_to_velocity_maps_symbols_and_digits() {
+        assert_eq!(step_char_to_velocity('X').unwrap(), 127);
+        assert_eq!(step_char_to_velocity('x').unwrap(), 32);
+        assert_eq!(step_char_to_velocity('.').unwrap(), 0);
+        assert_eq!(step_char_to_velocity('0').unwrap(), 0);
+        assert_eq!(step_char_to_velocity('9').unwrap(), 127);
+        assert_eq!(step_char_to_velocity('5').unwrap(), 70);
+        assert!(step_char_to_velocity('q').is_err(), "unknown char must error");
+    }
+
+    #[test]
+    fn parse_pattern_edit_happy_paths() {
+        let e = parse_pattern_edit("0:0:X...X...X...X...").unwrap();
+        assert_eq!(e.track, 0);
+        assert_eq!(e.pattern, 0);
+        assert_eq!(e.velocities.len(), 16);
+        assert_eq!(e.velocities[0], 127);
+        assert_eq!(e.velocities[1], 0);
+        assert_eq!(e.probability, None);
+
+        let e = parse_pattern_edit("1:2:x.x.:5").unwrap();
+        assert_eq!(e.track, 1);
+        assert_eq!(e.pattern, 2);
+        assert_eq!(e.velocities, vec![32u8, 0, 32, 0]);
+        assert_eq!(e.probability, Some(5));
+    }
+
+    #[test]
+    fn parse_pattern_edit_error_paths() {
+        assert!(parse_pattern_edit("0:0").is_err(), "missing steps field");
+        assert!(parse_pattern_edit("0:0:").is_err(), "empty steps");
+        let too_long = format!("0:0:{}", "X".repeat(33));
+        assert!(parse_pattern_edit(&too_long).is_err(), "more than 32 steps");
+        assert!(parse_pattern_edit("0:0:Xq..").is_err(), "invalid step char");
+        assert!(parse_pattern_edit("4:0:X").is_err(), "track out of range");
+        assert!(parse_pattern_edit("0:8:X").is_err(), "pattern out of range");
+        assert!(parse_pattern_edit("0:0:X:10").is_err(), "probability out of range");
+        assert!(parse_pattern_edit("a:0:X").is_err(), "non-numeric track");
+    }
+
+    #[test]
+    fn apply_pattern_edit_roundtrips_through_real_data() {
+        let mut data = read_file("../test_data/Deep.ncs").expect("read Deep.ncs");
+        let orig_len = data.len();
+        let offsets = default_drum_offsets();
+        let edit = parse_pattern_edit("0:0:X...X...X...X...").unwrap();
+        apply_pattern_edit(&mut data, &offsets, &edit).expect("apply edit");
+        assert_eq!(data.len(), orig_len, "edit must not resize the buffer");
+
+        let drums = DrumData::from_bytes(&data, &offsets).expect("parse drums");
+        let steps = &drums.tracks[0].patterns[0].steps;
+        assert_eq!(steps[0].velocity, 127);
+        assert_eq!(steps[0].probability, 7, "played hit gets default probability 7");
+        assert_eq!(steps[1].velocity, 0);
+        assert_eq!(steps[1].probability, 0, "rest gets zero probability");
+        assert_eq!(steps[4].velocity, 127);
+        assert_eq!(steps[8].velocity, 127);
+        assert_eq!(steps[12].velocity, 127);
+    }
+
+    #[test]
+    fn apply_pattern_edit_zeroes_rest_probability_and_honors_custom_prob() {
+        let mut data = read_file("../test_data/Deep.ncs").expect("read Deep.ncs");
+        let offsets = default_drum_offsets();
+        let edit = parse_pattern_edit("1:0:x.x.:5").unwrap();
+        apply_pattern_edit(&mut data, &offsets, &edit).expect("apply edit");
+
+        let drums = DrumData::from_bytes(&data, &offsets).expect("parse drums");
+        let steps = &drums.tracks[1].patterns[0].steps;
+        assert_eq!(steps[0].velocity, 32);
+        assert_eq!(steps[0].probability, 5, "played hit uses the custom probability");
+        assert_eq!(steps[1].velocity, 0);
+        assert_eq!(steps[1].probability, 0, "rest probability is forced to zero");
+    }
+
+    #[test]
+    fn apply_pattern_edit_errors_when_offset_exceeds_buffer() {
+        let mut data = vec![0u8; 16];
+        let offsets = default_drum_offsets();
+        let edit = parse_pattern_edit("0:0:X").unwrap();
+        let result = apply_pattern_edit(&mut data, &offsets, &edit);
+        assert!(result.is_err(), "velocity offset beyond a tiny buffer must error");
     }
 }
 
