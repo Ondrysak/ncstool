@@ -588,10 +588,11 @@ fn run_analyze(file_path: &str) -> io::Result<()> {
         + 4             // scene chain
         + (8 * 4)       // pattern chains
         + (2 * 8 * 32 * 28)  // synth steps fully typed: 28 bytes/step
-        + (2 * 8 * 32 * 28); // midi steps fully typed: 28 bytes/step
+        + (2 * 8 * 32 * 28)  // midi steps fully typed: 28 bytes/step
+        + (4 * 8 * (2 + 1 + 1 + 8 * 192)); // drum tail/pattern: playbackRange+sync+dir+automation (gap +132..167 NOT counted)
     let total = data.len();
     println!(
-        "Known bytes: {} / {} ({:.2}%) | typed: timing, synth+midi(stepInfo+notes), drums, scale, fx; legacy: scenes+chains",
+        "Known bytes: {} / {} ({:.2}%) | typed: timing, synth+midi(stepInfo+notes), drums(+tail/automation), scale, fx; legacy: scenes+chains",
         known, total, (known as f64) * 100.0 / (total.max(1) as f64)
     );
 

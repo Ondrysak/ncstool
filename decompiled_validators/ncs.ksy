@@ -169,6 +169,9 @@ types:
         doc: remainder of track stride after 8 patterns
 
   drum_pattern:
+    # 1704 bytes: 4 step planes (128) + tail. Tail offsets VERIFIED from validators
+    # f_nr (playbackRange +128/+129 <=31), f_dr (syncRate +130 <=7),
+    # f_uq (playbackDirection +131 <=3), f_lq (automation +168, 8 lanes x 192).
     seq:
       - id: velocity
         size: 32
@@ -178,6 +181,23 @@ types:
         size: 32
       - id: drum_rhythm
         size: 32
-      - id: pattern_tail
-        size: 0x6a8 - 128
-        doc: playbackRange / syncRate / playbackDirection / automation (pending decode)
+      - id: playback_start
+        type: u1
+        valid: { min: 0, max: 31 }
+      - id: playback_end
+        type: u1
+        valid: { min: 0, max: 31 }
+      - id: sync_rate
+        type: u1
+        valid: { min: 0, max: 7 }
+      - id: playback_direction
+        type: u1
+        valid: { min: 0, max: 3 }
+      - id: unknown_132_167
+        size: 36
+        doc: no validator — carried raw (pending decode)
+      - id: automation
+        size: 192
+        repeat: expr
+        repeat-expr: 8
+        doc: 8 lanes x 192 bytes; values checked against an allowlist by f_lq

@@ -188,10 +188,26 @@ pub struct DrumStep {
     pub rhythm: u8,
 }
 
+/// Per-pattern tail metadata (VERIFIED offsets, relative to the pattern's
+/// velocity-plane base): playbackRange {start,end} @+128/+129 (0..31),
+/// syncRate @+130 (0..7), playbackDirection @+131 (0..3). Bytes +132..+167
+/// are UNKNOWN (no validator). Automation: 8 lanes x 192 bytes @+168.
 #[derive(Debug, Clone)]
 pub struct DrumPattern {
     pub steps: Vec<DrumStep>, // 32
+    pub playback_start: u8,   // +128, 0..31
+    pub playback_end: u8,     // +129, 0..31
+    pub sync_rate: u8,        // +130, 0..7
+    pub playback_direction: u8, // +131, 0..3
+    /// +132..+167 (36 bytes): no validator — carried raw for round-trip fidelity.
+    pub unknown_132_167: [u8; 36],
+    pub automation: Vec<[u8; 192]>, // 8 lanes x 192 values @+168
 }
+
+pub const AUTOMATION_LANES: usize = 8;
+pub const AUTOMATION_LANE_LEN: usize = 192;
+pub const DRUM_TAIL_PLAYBACK_START: usize = 128;
+pub const DRUM_TAIL_AUTOMATION: usize = 168;
 
 #[derive(Debug, Clone)]
 pub struct DrumTrack {
@@ -213,9 +229,10 @@ impl DrumData {
         for t in 0..Self::TRACKS {
             let mut patterns = Vec::with_capacity(Self::PATTERNS);
             for p in 0..Self::PATTERNS {
+                let pat_base = t * DRUM_TRACK_STRIDE + p * PATTERN_STRIDE_DRUM;
                 let mut steps = Vec::with_capacity(Self::STEPS);
                 for s in 0..Self::STEPS {
-                    let idx = t * DRUM_TRACK_STRIDE + p * PATTERN_STRIDE_DRUM + s;
+                    let idx = pat_base + s;
                     steps.push(DrumStep {
                         velocity: u8_at(d, DRUM_VELOCITY + idx)?,
                         probability: u8_at(d, DRUM_PROBABILITY + idx)?,
@@ -223,7 +240,29 @@ impl DrumData {
                         rhythm: u8_at(d, DRUM_RHYTHM + idx)?,
                     });
                 }
-                patterns.push(DrumPattern { steps });
+                // tail: offsets relative to the velocity-plane base for this pattern
+                let tail = DRUM_VELOCITY + pat_base;
+                let playback_start = u8_at(d, tail + DRUM_TAIL_PLAYBACK_START)?;
+                let playback_end = u8_at(d, tail + DRUM_TAIL_PLAYBACK_START + 1)?;
+                let sync_rate = u8_at(d, tail + 130)?;
+                let playback_direction = u8_at(d, tail + 131)?;
+                let mut unknown_132_167 = [0u8; 36];
+                for (i, slot) in unknown_132_167.iter_mut().enumerate() {
+                    *slot = u8_at(d, tail + 132 + i)?;
+                }
+                let mut automation = Vec::with_capacity(AUTOMATION_LANES);
+                for lane in 0..AUTOMATION_LANES {
+                    let mut vals = [0u8; AUTOMATION_LANE_LEN];
+                    let lane_base = tail + DRUM_TAIL_AUTOMATION + lane * AUTOMATION_LANE_LEN;
+                    for (v, slot) in vals.iter_mut().enumerate() {
+                        *slot = u8_at(d, lane_base + v)?;
+                    }
+                    automation.push(vals);
+                }
+                patterns.push(DrumPattern {
+                    steps, playback_start, playback_end, sync_rate, playback_direction,
+                    unknown_132_167, automation,
+                });
             }
             tracks.push(DrumTrack { patterns });
         }
@@ -330,6 +369,19 @@ impl Session {
                         v.push(format!(
                             "drum[{}][{}].step[{}].velocity {} > 127", ti, pi, si, step.velocity));
                     }
+                }
+                // per-pattern tail (VERIFIED ranges)
+                if pat.playback_start > 31 {
+                    v.push(format!("drum[{}][{}].playback_start {} > 31", ti, pi, pat.playback_start));
+                }
+                if pat.playback_end > 31 {
+                    v.push(format!("drum[{}][{}].playback_end {} > 31", ti, pi, pat.playback_end));
+                }
+                if pat.sync_rate > 7 {
+                    v.push(format!("drum[{}][{}].sync_rate {} > 7", ti, pi, pat.sync_rate));
+                }
+                if pat.playback_direction > 3 {
+                    v.push(format!("drum[{}][{}].playback_direction {} > 3", ti, pi, pat.playback_direction));
                 }
             }
         }
@@ -776,6 +828,170 @@ mod tests {
     /// introducing a spurious violation on genuinely valid sessions.
     #[test]
     fn real_files_validate_clean_with_midi() {
+        for name in ["Deep.ncs", "Funk.ncs"] {
+            let session = Session::parse(&load(name)).expect("sample must parse");
+            let violations = session.validate();
+            assert!(
+                violations.is_empty(),
+                "{name} is a real valid session but validate() reported {} violation(s): {:?}",
+                violations.len(),
+                violations
+            );
+        }
+    }
+
+    /// The reverse-engineered per-pattern tail lands in the validator's ranges
+    /// across ALL 4*8 = 32 drum patterns of BOTH real files: playback_start &
+    /// playback_end <= 31, sync_rate <= 7, playback_direction <= 3. These windows
+    /// are tight, so a wrong DRUM_TAIL offset or a stride regression that reads
+    /// neighbouring bytes would almost certainly overflow one of them and redden
+    /// here. Also pins the observed playback_start alphabet {15, 31} (empirically
+    /// confirmed on both samples) -- a shifted base reading a different byte would
+    /// break the set, not just the range.
+    #[test]
+    fn drum_tail_ranges_hold() {
+        use std::collections::BTreeSet;
+        for name in ["Deep.ncs", "Funk.ncs"] {
+            let session = Session::parse(&load(name)).expect("sample must parse");
+            let mut checked = 0usize;
+            let mut starts = BTreeSet::new();
+            for (t, track) in session.drums.tracks.iter().enumerate() {
+                for (p, pat) in track.patterns.iter().enumerate() {
+                    assert!(
+                        pat.playback_start <= 31,
+                        "{name} drum t{t} p{p} playback_start {} > 31",
+                        pat.playback_start
+                    );
+                    assert!(
+                        pat.playback_end <= 31,
+                        "{name} drum t{t} p{p} playback_end {} > 31",
+                        pat.playback_end
+                    );
+                    assert!(
+                        pat.sync_rate <= 7,
+                        "{name} drum t{t} p{p} sync_rate {} > 7",
+                        pat.sync_rate
+                    );
+                    assert!(
+                        pat.playback_direction <= 3,
+                        "{name} drum t{t} p{p} playback_direction {} > 3",
+                        pat.playback_direction
+                    );
+                    starts.insert(pat.playback_start);
+                    checked += 1;
+                }
+            }
+            assert_eq!(checked, 32, "{name} expected exactly 4*8 = 32 drum patterns");
+            let observed: Vec<u8> = starts.iter().copied().collect();
+            assert!(
+                starts.iter().all(|&s| s == 15 || s == 31),
+                "{name} playback_start alphabet drifted from the confirmed {{15, 31}}: {:?}",
+                observed
+            );
+        }
+    }
+
+    /// Every drum pattern in both files carries exactly AUTOMATION_LANES lanes of
+    /// AUTOMATION_LANE_LEN bytes (8 x 192). In Deep.ncs every automation byte is
+    /// the 0xFF "unused" sentinel across all lanes and all values -- if the
+    /// automation base/stride were wrong, the block would spill into decoded step
+    /// data and this all-0xFF invariant would break. Funk.ncs deliberately is NOT
+    /// asserted all-0xFF (it carries some live automation values).
+    #[test]
+    fn drum_automation_shape() {
+        for name in ["Deep.ncs", "Funk.ncs"] {
+            let session = Session::parse(&load(name)).expect("sample must parse");
+            for (t, track) in session.drums.tracks.iter().enumerate() {
+                for (p, pat) in track.patterns.iter().enumerate() {
+                    assert_eq!(
+                        pat.automation.len(),
+                        AUTOMATION_LANES,
+                        "{name} drum t{t} p{p} lane count"
+                    );
+                    assert_eq!(pat.automation.len(), 8, "{name} drum t{t} p{p} lane count literal");
+                    for (l, lane) in pat.automation.iter().enumerate() {
+                        assert_eq!(
+                            lane.len(),
+                            AUTOMATION_LANE_LEN,
+                            "{name} drum t{t} p{p} lane{l} length"
+                        );
+                        assert_eq!(lane.len(), 192, "{name} drum t{t} p{p} lane{l} length literal");
+                    }
+                }
+            }
+        }
+
+        // Deep.ncs: the entire automation region is the 0xFF unused sentinel.
+        let deep = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        for (t, track) in deep.drums.tracks.iter().enumerate() {
+            for (p, pat) in track.patterns.iter().enumerate() {
+                for (l, lane) in pat.automation.iter().enumerate() {
+                    assert!(
+                        lane.iter().all(|&b| b == 0xFF),
+                        "Deep drum t{t} p{p} lane{l} expected all 0xFF sentinel, got {:?}",
+                        lane
+                    );
+                }
+            }
+        }
+    }
+
+    /// validate() routes the drum per-pattern tail through its range checks: an
+    /// out-of-range sync_rate (8 > 7) and, on a fresh clean session, an
+    /// out-of-range playback_start (32 > 31) are each reported with a message
+    /// naming both the drum plane and the offending field. Re-parsing between the
+    /// two mutations keeps them independent, so each assertion proves its own
+    /// field is wired -- not that some other tail check fired.
+    #[test]
+    fn drum_tail_validation_reports_bad() {
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.drums.tracks[0].patterns[0].sync_rate = 8;
+        let sync = sess.validate();
+        assert!(
+            sync.iter().any(|m| m.contains("drum") && m.contains("sync_rate")),
+            "drum sync_rate=8 (> 7) must be reported naming 'drum' and 'sync_rate', got {:?}",
+            sync
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.drums.tracks[0].patterns[0].playback_start = 32;
+        let start = sess.validate();
+        assert!(
+            start.iter().any(|m| m.contains("drum") && m.contains("playback_start")),
+            "drum playback_start=32 (> 31) must be reported naming 'drum' and 'playback_start', got {:?}",
+            start
+        );
+    }
+
+    /// The still-undecoded gap (+132..=+167, no validator yet) is carried as a
+    /// fixed 36-byte block for round-trip fidelity. Beyond documenting the width
+    /// (36 == 167-132+1), prove the carried bytes are the actual file bytes at the
+    /// gap offset for track0/pattern0 (velocity-plane base == DRUM_VELOCITY,
+    /// pat_base == 0) -- an off-by-one in the gap loop or a shifted base would read
+    /// the wrong 36 bytes and redden here.
+    #[test]
+    fn unknown_gap_is_36_bytes() {
+        let raw = load("Deep.ncs");
+        let deep = Session::parse(&raw).expect("Deep.ncs must parse");
+        let pat = &deep.drums.tracks[0].patterns[0];
+
+        assert_eq!(pat.unknown_132_167.len(), 36, "unknown gap must carry 36 bytes");
+        assert_eq!(167 - 132 + 1, 36, "gap +132..=+167 spans 36 bytes");
+
+        let gap_off = DRUM_VELOCITY + 132;
+        assert_eq!(
+            &pat.unknown_132_167[..],
+            &raw[gap_off..gap_off + 36],
+            "unknown_132_167 must carry the raw file bytes at +132..=+167"
+        );
+    }
+
+    /// Regression guard for the newly-added drum-tail range checks: both real,
+    /// valid files must still validate() clean. If a drum-tail bound is decoded
+    /// wrong (or a check is too strict), one of these genuinely valid sessions
+    /// would report a spurious violation here.
+    #[test]
+    fn real_files_validate_clean_still() {
         for name in ["Deep.ncs", "Funk.ncs"] {
             let session = Session::parse(&load(name)).expect("sample must parse");
             let violations = session.validate();
