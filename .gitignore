@@ -42,3 +42,16 @@ Desktop.ini
 # Linux
 *~
 
+
+# Reverse-engineering artifacts — regenerate locally, never commit (proprietary / large)
+decompiled_validators/validator.wasm
+decompiled_validators/validator.dcmp
+decompiled_validators/validator.wat
+decompiled_validators/*.wasm
+decompiled_validators/*.dcmp
+decompiled_validators/*.wat
+# Local RE toolchain (kept outside repo, but guard anyway)
+**/ghidra_*_PUBLIC/
+**/jdk-*/
+**/wabt-*/
+*.ncs.bin
