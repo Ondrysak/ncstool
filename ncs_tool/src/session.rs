@@ -319,17 +319,50 @@ pub struct Fx {
     pub reverb_preset: u8, // inferred 0..7
 }
 
+// ---------------- track info + global scalars ----------------
+
+/// synth/midi track info record (8-byte stride). VERIFIED offsets within record:
+/// patch @+0, muteState @+2, sidechainPreset @+3.
+#[derive(Debug, Clone, Copy)]
+pub struct TrackInfo {
+    pub patch: u8,
+    pub mute_state: u8,
+    pub sidechain_preset: u8,
+}
+
+pub const SYNTH_TRACK_INFO_BASE: usize = 0xCD64;
+pub const DRUM_MUTE_BASE: usize = 0x1A274;       // 4 tracks, bool 0..1
+pub const DEFAULT_DRUM_CHOICE_BASE: usize = 0x1A278; // 4 tracks, 0..64
+pub const MIDI_TRACK_INFO_BASE: usize = 0x26CFC;
+pub const MIDI_OCTAVE_BASE: usize = 0x26D10;     // 2 tracks
+
+impl TrackInfo {
+    fn parse(d: &[u8], base: usize) -> io::Result<Self> {
+        Ok(TrackInfo {
+            patch: u8_at(d, base)?,
+            mute_state: u8_at(d, base + 2)?,
+            sidechain_preset: u8_at(d, base + 3)?,
+        })
+    }
+}
+
 // ---------------- top-level session ----------------
 
 #[derive(Debug, Clone)]
 pub struct Session {
+    pub file_size: u32,               // header @+4 (must equal 160780)
     pub timing: Timing,
     pub synth: SynthData,
     pub midi: MidiData,
     pub drums: DrumData,
+    pub synth_track_info: [TrackInfo; 2],   // @0xCD64
+    pub midi_track_info: [TrackInfo; 2],    // @0x26CFC
+    pub drum_mute_states: [u8; 4],          // @0x1A274, 0..1
+    pub default_drum_choices: [u8; 4],      // @0x1A278, 0..64
+    pub midi_keyboard_octaves: [u8; 2],     // @0x26D10
     pub scale: Scale,
     pub fx: Fx,
-    // pending: header, scenes, chains, per-pattern tail + automation, track info, octaves
+    // pending: scenes, chains, feature flags; per-pattern 36-byte gaps carried raw
 }
 /// Shared range validation for a melodic block (synth or midi), pushing messages
 /// prefixed with `kind` into `v`. Ranges are the validator's: probability<=7,
@@ -381,11 +414,33 @@ impl Session {
         if d.len() != FILE_SIZE {
             return Err(err("not a Circuit Tracks .ncs (expected 160780 bytes)"));
         }
+        let u32le = |off: usize| -> io::Result<u32> {
+            let b = d.get(off..off + 4).ok_or_else(|| err("u32 past end"))?;
+            Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        };
         Ok(Session {
+            file_size: u32le(4)?,
             timing: Timing::parse(d)?,
             synth: SynthData::parse(d)?,
             midi: MidiData::parse(d)?,
             drums: DrumData::parse(d)?,
+            synth_track_info: [
+                TrackInfo::parse(d, SYNTH_TRACK_INFO_BASE)?,
+                TrackInfo::parse(d, SYNTH_TRACK_INFO_BASE + 8)?,
+            ],
+            midi_track_info: [
+                TrackInfo::parse(d, MIDI_TRACK_INFO_BASE)?,
+                TrackInfo::parse(d, MIDI_TRACK_INFO_BASE + 8)?,
+            ],
+            drum_mute_states: [
+                u8_at(d, DRUM_MUTE_BASE)?, u8_at(d, DRUM_MUTE_BASE + 1)?,
+                u8_at(d, DRUM_MUTE_BASE + 2)?, u8_at(d, DRUM_MUTE_BASE + 3)?,
+            ],
+            default_drum_choices: [
+                u8_at(d, DEFAULT_DRUM_CHOICE_BASE)?, u8_at(d, DEFAULT_DRUM_CHOICE_BASE + 1)?,
+                u8_at(d, DEFAULT_DRUM_CHOICE_BASE + 2)?, u8_at(d, DEFAULT_DRUM_CHOICE_BASE + 3)?,
+            ],
+            midi_keyboard_octaves: [u8_at(d, MIDI_OCTAVE_BASE)?, u8_at(d, MIDI_OCTAVE_BASE + 1)?],
             scale: Scale { root: u8_at(d, 0x26D0C)?, scale_type: u8_at(d, 0x26D0D)? },
             fx: Fx { delay_preset: u8_at(d, 0x26D0E)?, reverb_preset: u8_at(d, 0x26D0F)? },
         })
@@ -431,6 +486,42 @@ impl Session {
                 if pat.playback_direction > 3 {
                     v.push(format!("drum[{}][{}].playback_direction {} > 3", ti, pi, pat.playback_direction));
                 }
+            }
+        }
+        // header + track info + global scalars (VERIFIED ranges)
+        if self.file_size != FILE_SIZE as u32 {
+            v.push(format!("header file_size {} != {}", self.file_size, FILE_SIZE));
+        }
+        for (i, ti) in self.synth_track_info.iter().enumerate() {
+            if ti.patch >= 128 {
+                v.push(format!("synth_track_info[{}].patch {} >= 128", i, ti.patch));
+            }
+            if ti.mute_state > 1 {
+                v.push(format!("synth_track_info[{}].mute_state {} > 1", i, ti.mute_state));
+            }
+            if ti.sidechain_preset > 7 {
+                v.push(format!("synth_track_info[{}].sidechain_preset {} > 7", i, ti.sidechain_preset));
+            }
+        }
+        for (i, ti) in self.midi_track_info.iter().enumerate() {
+            if ti.patch > 7 {
+                v.push(format!("midi_track_info[{}].patch {} > 7", i, ti.patch));
+            }
+            if ti.mute_state > 1 {
+                v.push(format!("midi_track_info[{}].mute_state {} > 1", i, ti.mute_state));
+            }
+            if ti.sidechain_preset > 7 {
+                v.push(format!("midi_track_info[{}].sidechain_preset {} > 7", i, ti.sidechain_preset));
+            }
+        }
+        for (i, &m) in self.drum_mute_states.iter().enumerate() {
+            if m > 1 {
+                v.push(format!("drum_mute_states[{}] {} > 1", i, m));
+            }
+        }
+        for (i, &c) in self.default_drum_choices.iter().enumerate() {
+            if c > 64 {
+                v.push(format!("default_drum_choices[{}] {} > 64", i, c));
             }
         }
         v
@@ -1211,5 +1302,128 @@ mod tests {
                 violations
             );
         }
+    }
+
+    /// The reverse-engineered scalar offsets (header file_size, synth/midi track
+    /// info records, drum mute/choice arrays, midi keyboard octaves) land on the
+    /// exact values these two real sessions carry. Deep pins every scalar; Funk
+    /// pins the fields the assignment specifies as distinct. A shifted base or a
+    /// wrong record stride would decode a different byte and redden here.
+    #[test]
+    fn scalars_decode_on_samples() {
+        let deep = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+
+        assert_eq!(deep.file_size, FILE_SIZE as u32, "Deep header file_size");
+
+        assert_eq!(deep.synth_track_info[0].patch, 31, "Deep synth track0 patch");
+        assert_eq!(deep.synth_track_info[1].patch, 43, "Deep synth track1 patch");
+        for (i, ti) in deep.synth_track_info.iter().enumerate() {
+            assert_eq!(ti.mute_state, 0, "Deep synth track{i} mute_state");
+            assert_eq!(ti.sidechain_preset, 0, "Deep synth track{i} sidechain_preset");
+        }
+
+        assert_eq!(deep.drum_mute_states, [0, 0, 0, 0], "Deep drum mute states");
+        assert_eq!(deep.default_drum_choices, [48, 4, 27, 6], "Deep default drum choices");
+        assert_eq!(deep.midi_keyboard_octaves, [64, 64], "Deep midi keyboard octaves");
+
+        let funk = Session::parse(&load("Funk.ncs")).expect("Funk.ncs must parse");
+        assert_eq!(funk.file_size, FILE_SIZE as u32, "Funk header file_size");
+        assert_eq!(funk.default_drum_choices, [48, 34, 58, 6], "Funk default drum choices");
+    }
+
+    /// Regression guard for the newly-added scalar range checks (file_size,
+    /// synth/midi track info, drum mute states, default drum choices): both real,
+    /// valid files must still validate() clean. If a scalar bound is decoded wrong
+    /// (or a check is too strict), one of these genuinely valid sessions would
+    /// report a spurious violation here.
+    #[test]
+    fn scalars_validate_clean() {
+        for name in ["Deep.ncs", "Funk.ncs"] {
+            let session = Session::parse(&load(name)).expect("sample must parse");
+            let violations = session.validate();
+            assert!(
+                violations.is_empty(),
+                "{name} is a real valid session but validate() reported {} violation(s): {:?}",
+                violations.len(),
+                violations
+            );
+        }
+    }
+
+    /// Each scalar range check in validate() fires for its own out-of-range value
+    /// and names the offending field. Every mutation starts from a fresh clean
+    /// parse of Deep.ncs so exactly one violation is provoked at a time -- proving
+    /// each check is independently wired, not that some unrelated check fired.
+    #[test]
+    fn scalar_validation_reports_bad() {
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.synth_track_info[0].sidechain_preset = 8;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("synth_track_info") && m.contains("sidechain_preset")),
+            "synth_track_info[0].sidechain_preset=8 (> 7) must be reported naming 'synth_track_info' and 'sidechain_preset', got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.midi_track_info[0].mute_state = 2;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("midi_track_info") && m.contains("mute_state")),
+            "midi_track_info[0].mute_state=2 (> 1) must be reported naming 'midi_track_info' and 'mute_state', got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.drum_mute_states[0] = 2;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("drum_mute_states")),
+            "drum_mute_states[0]=2 (> 1) must be reported naming 'drum_mute_states', got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.default_drum_choices[0] = 65;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("default_drum_choices")),
+            "default_drum_choices[0]=65 (> 64) must be reported naming 'default_drum_choices', got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.file_size = 123;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("file_size")),
+            "file_size=123 (!= {}) must be reported naming 'file_size', got {:?}",
+            FILE_SIZE, v
+        );
+    }
+
+    /// The TrackInfo record layout reads patch @+0, mute_state @+2,
+    /// sidechain_preset @+3 within an 8-byte record. Pin the SECOND synth record
+    /// (base + 8) against the raw file bytes at those exact sub-offsets: an
+    /// off-by-one in the record stride, or a shifted field offset, would decode
+    /// the wrong byte and redden here.
+    #[test]
+    fn track_info_offsets_within_record() {
+        let raw = load("Deep.ncs");
+        let deep = Session::parse(&raw).expect("Deep.ncs must parse");
+        let rec1 = SYNTH_TRACK_INFO_BASE + 8;
+
+        assert_eq!(
+            deep.synth_track_info[1].patch, raw[rec1],
+            "synth_track_info[1].patch must be raw byte at 0x{:X} (base + 8 + 0)", rec1
+        );
+        assert_eq!(
+            deep.synth_track_info[1].mute_state, raw[rec1 + 2],
+            "synth_track_info[1].mute_state must be raw byte at 0x{:X} (base + 8 + 2)", rec1 + 2
+        );
+        assert_eq!(
+            deep.synth_track_info[1].sidechain_preset, raw[rec1 + 3],
+            "synth_track_info[1].sidechain_preset must be raw byte at 0x{:X} (base + 8 + 3)", rec1 + 3
+        );
     }
 }

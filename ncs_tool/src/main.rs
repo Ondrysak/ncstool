@@ -589,10 +589,13 @@ fn run_analyze(file_path: &str) -> io::Result<()> {
         + (8 * 4)       // pattern chains
         // synth+midi: steps (28*32) + tail (playback 2 + sync 1 + dir 1 + automation 12*192); gap +900..935 NOT counted
         + (2 * (2 * 8 * (32 * 28 + 2 + 1 + 1 + 12 * 192)))
-        + (4 * 8 * (2 + 1 + 1 + 8 * 192)); // drum tail/pattern (gap +132..167 NOT counted)
+        + (4 * 8 * (2 + 1 + 1 + 8 * 192))  // drum tail/pattern (gap +132..167 NOT counted)
+        + 4                // header file_size @+4
+        + (2 * 3) + (2 * 3) // synth+midi track_info: only 3 stored bytes/track (patch,mute,sidechain); reserved +1/+4..7 not carried
+        + 4 + 4 + 2;       // drum mutes(4) + default choices(4) + midi octaves(2)
     let total = data.len();
     println!(
-        "Parsed/carried bytes: {} / {} ({:.2}%) | typed: timing, synth+midi(steps+tail), drums(+tail), scale, fx; automation carried RAW (values not allowlist-checked); legacy: scenes+chains; ~2.7% still unmapped (per-pattern 36B gaps, track_info, octaves, header)",
+        "Parsed/carried bytes: {} / {} ({:.2}%) | typed: timing, synth+midi(steps+tail)+track_info, drums(+tail)+mutes+choices, scale, fx, octaves, header; automation RAW; legacy: scenes+chains",
         known, total, (known as f64) * 100.0 / (total.max(1) as f64)
     );
 
@@ -602,6 +605,12 @@ fn run_analyze(file_path: &str) -> io::Result<()> {
              t.tempo, t.swing, t.swing_sync_rate, t.spare1, t.spare2);
     println!("Scale: root={} type={}", sess.scale.root, sess.scale.scale_type);
     println!("FX: delay_preset={} reverb_preset={}", sess.fx.delay_preset, sess.fx.reverb_preset);
+    println!("SynthTrackInfo: {:?}", sess.synth_track_info.iter()
+        .map(|t| (t.patch, t.mute_state, t.sidechain_preset)).collect::<Vec<_>>());
+    println!("MidiTrackInfo:  {:?}", sess.midi_track_info.iter()
+        .map(|t| (t.patch, t.mute_state, t.sidechain_preset)).collect::<Vec<_>>());
+    println!("DrumMuteStates: {:?}  DefaultDrumChoices: {:?}  MidiOctaves: {:?}",
+             sess.drum_mute_states, sess.default_drum_choices, sess.midi_keyboard_octaves);
 
     // ---- scenes & chains (legacy) ----
     let scenes_offsets = ScenesOffsets { base: 0x40, scene_stride: 0x28, entry_stride: 4 };

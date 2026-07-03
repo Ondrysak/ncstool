@@ -22,25 +22,29 @@ File size constant in the validator: `0x2740C = 160780` — matches our samples 
 
 | # | file section              | decompile fn | status |
 |---|---------------------------|--------------|--------|
-| 1 | header + feature flags    | f_tu | strings only |
+| 1 | header + feature flags    | f_tu | **VERIFIED** file_size@+4==160780 (feature flags pending) |
 | 2 | timing                    | f_ku | **VERIFIED** offsets+ranges |
-| 3 | scenes (16×8)             | f_hu | partial |
-| 4 | scene chain               | f_cu | partial |
-| 5 | pattern chain             | f_wt | partial |
-| 6 | synth patterns — steps    | f_qt | **VERIFIED** geometry |
-| 7–10 | synth patterns B–E     | f_kt,f_ft,f_xs,f_ms | pending |
-| 11 | synth track info          | f_ds | pending |
-| 12 | drum patterns — steps     | f_vr | **VERIFIED** geometry+planes |
-| 13–16 | drum patterns B–E     | f_nr,f_dr,f_uq,f_lq | pending |
-| 17 | drum mute states          | f_aq | pending |
-| 18 | default drum choices      | f_pp | pending |
-| 19–23 | midi patterns A–E     | f_ep,f_yo,f_qo,f_ho,f_do | pending |
-| 24 | midi track info           | f_yn | pending |
+| 3 | scenes (16×8)             | f_hu | partial (legacy parse) |
+| 4 | scene chain               | f_cu | partial (legacy parse) |
+| 5 | pattern chain             | f_wt | partial (legacy parse) |
+| 6 | synth patterns — steps    | f_qt | **VERIFIED** geometry+stepInfo+notes |
+| 7–10 | synth pattern tail     | f_kt,f_ft,f_xs,f_ms | **VERIFIED** playbackRange/sync/dir/automation(12 lanes) |
+| 11 | synth track info          | f_ds | **VERIFIED** patch<128, mute<=1, sidechain<=7 |
+| 12 | drum patterns — steps     | f_vr | **VERIFIED** geometry+4 planes |
+| 13–16 | drum pattern tail     | f_nr,f_dr,f_uq,f_lq | **VERIFIED** playbackRange/sync/dir/automation(8 lanes) |
+| 17 | drum mute states          | f_aq | **VERIFIED** @0x1A274, 0..1 |
+| 18 | default drum choices      | f_pp | **VERIFIED** @0x1A278, 0..64 |
+| 19–23 | midi patterns          | f_ep,f_yo,f_qo,f_ho,f_do | **VERIFIED** (same shape as synth, base 0x1A27C) |
+| 24 | midi track info           | f_yn | **VERIFIED** patch<=7, mute<=1, sidechain<=7 |
 | 25 | scale (root/type)         | f_tn | **VERIFIED** offsets+ranges |
 | 26 | fx (delay/reverb)         | f_ln | **VERIFIED** offsets+ranges |
-| 27 | midi keyboard octaves     | f_cn | pending |
+| 27 | midi keyboard octaves     | f_cn | parsed @0x26D10 (allowlist range, not asserted) |
 | 28–30 | report helpers        | f_um,f_nm,f_km | n/a |
 | 31 | root orchestrator stub    | f_fm | n/a |
+
+**Parsed/carried: ~97.3%.** Remaining unmapped: per-pattern 36-byte gaps
+(no validator; carried raw), feature-flag bytes in the header, and the
+scenes/chains region (still legacy-parsed, not yet in the typed model).
 
 ---
 
