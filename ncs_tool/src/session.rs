@@ -110,17 +110,33 @@ impl MelodicStep {
     }
 }
 
+/// Melodic (synth/midi) pattern: 32 steps then a per-pattern tail (VERIFIED).
+/// Tail offsets relative to the pattern's stepInfo start (= step 0):
+///   +896/+897 playbackRange {start,end} (0..31), +898 syncRate (0..7),
+///   +899 playbackDirection (0..3), +900..+935 UNKNOWN (36 bytes),
+///   +936.. automation 12 lanes x 192 bytes. Whole record spans 3240 bytes.
 #[derive(Debug, Clone)]
 pub struct MelodicPattern {
     pub steps: Vec<MelodicStep>, // 32
+    pub playback_start: u8,      // +896, 0..31
+    pub playback_end: u8,        // +897, 0..31
+    pub sync_rate: u8,           // +898, 0..7
+    pub playback_direction: u8,  // +899, 0..3
+    pub unknown_900_935: [u8; 36], // +900..+935, no validator, carried raw
+    pub automation: Vec<[u8; MELODIC_AUTOMATION_LANE_LEN]>, // 12 lanes x 192 @+936
 }
+
+pub const MELODIC_AUTOMATION_LANES: usize = 12;
+pub const MELODIC_AUTOMATION_LANE_LEN: usize = 192;
+const MELODIC_TAIL_PLAYBACK: usize = 896;
+const MELODIC_TAIL_AUTOMATION: usize = 936;
 
 #[derive(Debug, Clone)]
 pub struct MelodicTrack {
     pub patterns: Vec<MelodicPattern>, // 8
 }
 
-/// Parse a melodic block (synth or midi): 2 tracks x 8 patterns x 32 steps.
+/// Parse a melodic block (synth or midi): 2 tracks x 8 patterns x 32 steps + tail.
 /// `block_base` is the absolute offset of track0/pattern0/step0's stepInfo.
 fn parse_melodic_block(d: &[u8], block_base: usize) -> io::Result<Vec<MelodicTrack>> {
     const TRACKS: usize = 2;
@@ -130,13 +146,32 @@ fn parse_melodic_block(d: &[u8], block_base: usize) -> io::Result<Vec<MelodicTra
     for t in 0..TRACKS {
         let mut patterns = Vec::with_capacity(PATTERNS);
         for p in 0..PATTERNS {
+            let pat_base = block_base + t * SYNTH_TRACK_STRIDE + p * PATTERN_STRIDE_SYNTH;
             let mut steps = Vec::with_capacity(STEPS);
             for s in 0..STEPS {
-                let field_base =
-                    block_base + t * SYNTH_TRACK_STRIDE + p * PATTERN_STRIDE_SYNTH + s * STEP_STRIDE;
-                steps.push(MelodicStep::parse(d, field_base)?);
+                steps.push(MelodicStep::parse(d, pat_base + s * STEP_STRIDE)?);
             }
-            patterns.push(MelodicPattern { steps });
+            let playback_start = u8_at(d, pat_base + MELODIC_TAIL_PLAYBACK)?;
+            let playback_end = u8_at(d, pat_base + MELODIC_TAIL_PLAYBACK + 1)?;
+            let sync_rate = u8_at(d, pat_base + 898)?;
+            let playback_direction = u8_at(d, pat_base + 899)?;
+            let mut unknown_900_935 = [0u8; 36];
+            for (i, slot) in unknown_900_935.iter_mut().enumerate() {
+                *slot = u8_at(d, pat_base + 900 + i)?;
+            }
+            let mut automation = Vec::with_capacity(MELODIC_AUTOMATION_LANES);
+            for lane in 0..MELODIC_AUTOMATION_LANES {
+                let mut vals = [0u8; MELODIC_AUTOMATION_LANE_LEN];
+                let lane_base = pat_base + MELODIC_TAIL_AUTOMATION + lane * MELODIC_AUTOMATION_LANE_LEN;
+                for (v, slot) in vals.iter_mut().enumerate() {
+                    *slot = u8_at(d, lane_base + v)?;
+                }
+                automation.push(vals);
+            }
+            patterns.push(MelodicPattern {
+                steps, playback_start, playback_end, sync_rate, playback_direction,
+                unknown_900_935, automation,
+            });
         }
         tracks.push(MelodicTrack { patterns });
     }
@@ -322,6 +357,19 @@ fn validate_melodic(kind: &str, tracks: &[MelodicTrack], v: &mut Vec<String>) {
                         }
                     }
                 }
+            }
+            // per-pattern tail (VERIFIED ranges)
+            if pat.playback_start > 31 {
+                v.push(format!("{}[{}][{}].playback_start {} > 31", kind, ti, pi, pat.playback_start));
+            }
+            if pat.playback_end > 31 {
+                v.push(format!("{}[{}][{}].playback_end {} > 31", kind, ti, pi, pat.playback_end));
+            }
+            if pat.sync_rate > 7 {
+                v.push(format!("{}[{}][{}].sync_rate {} > 7", kind, ti, pi, pat.sync_rate));
+            }
+            if pat.playback_direction > 3 {
+                v.push(format!("{}[{}][{}].playback_direction {} > 3", kind, ti, pi, pat.playback_direction));
             }
         }
     }
@@ -992,6 +1040,167 @@ mod tests {
     /// would report a spurious violation here.
     #[test]
     fn real_files_validate_clean_still() {
+        for name in ["Deep.ncs", "Funk.ncs"] {
+            let session = Session::parse(&load(name)).expect("sample must parse");
+            let violations = session.validate();
+            assert!(
+                violations.is_empty(),
+                "{name} is a real valid session but validate() reported {} violation(s): {:?}",
+                violations.len(),
+                violations
+            );
+        }
+    }
+
+    /// The reverse-engineered melodic per-pattern tail lands in the validator's
+    /// ranges across ALL 2*8 = 16 synth AND 16 midi patterns of BOTH real files:
+    /// playback_start & playback_end <= 31, sync_rate <= 7, playback_direction <=
+    /// 3. These windows are tight, so a wrong MELODIC_TAIL offset or a stride
+    /// regression that reads neighbouring step/automation bytes would almost
+    /// certainly overflow one of them and redden here. Counting to exactly 16 per
+    /// block also pins the 2 tracks x 8 patterns geometry.
+    #[test]
+    fn melodic_tail_ranges_hold() {
+        for name in ["Deep.ncs", "Funk.ncs"] {
+            let session = Session::parse(&load(name)).expect("sample must parse");
+            for (kind, tracks) in
+                [("synth", &session.synth.tracks), ("midi", &session.midi.tracks)]
+            {
+                let mut checked = 0usize;
+                for (t, track) in tracks.iter().enumerate() {
+                    for (p, pat) in track.patterns.iter().enumerate() {
+                        assert!(
+                            pat.playback_start <= 31,
+                            "{name} {kind} t{t} p{p} playback_start {} > 31",
+                            pat.playback_start
+                        );
+                        assert!(
+                            pat.playback_end <= 31,
+                            "{name} {kind} t{t} p{p} playback_end {} > 31",
+                            pat.playback_end
+                        );
+                        assert!(
+                            pat.sync_rate <= 7,
+                            "{name} {kind} t{t} p{p} sync_rate {} > 7",
+                            pat.sync_rate
+                        );
+                        assert!(
+                            pat.playback_direction <= 3,
+                            "{name} {kind} t{t} p{p} playback_direction {} > 3",
+                            pat.playback_direction
+                        );
+                        checked += 1;
+                    }
+                }
+                assert_eq!(
+                    checked, 16,
+                    "{name} {kind} expected exactly 2*8 = 16 melodic patterns"
+                );
+            }
+        }
+    }
+
+    /// Every synth AND midi pattern in both files carries exactly
+    /// MELODIC_AUTOMATION_LANES lanes of MELODIC_AUTOMATION_LANE_LEN bytes
+    /// (12 x 192). The lane COUNT is the load-bearing distinction from the drum
+    /// block, which carries only 8 lanes -- so the literal `== 12` here (NOT 8)
+    /// pins the melodic-vs-drum geometry. A wrong lane count or automation stride
+    /// would spill the region into neighbouring pattern data.
+    #[test]
+    fn melodic_automation_is_12_lanes() {
+        for name in ["Deep.ncs", "Funk.ncs"] {
+            let session = Session::parse(&load(name)).expect("sample must parse");
+            for (kind, tracks) in
+                [("synth", &session.synth.tracks), ("midi", &session.midi.tracks)]
+            {
+                for (t, track) in tracks.iter().enumerate() {
+                    for (p, pat) in track.patterns.iter().enumerate() {
+                        assert_eq!(
+                            pat.automation.len(),
+                            MELODIC_AUTOMATION_LANES,
+                            "{name} {kind} t{t} p{p} lane count"
+                        );
+                        assert_eq!(
+                            pat.automation.len(),
+                            12,
+                            "{name} {kind} t{t} p{p} lane count literal (12, NOT the drum block's 8)"
+                        );
+                        for (l, lane) in pat.automation.iter().enumerate() {
+                            assert_eq!(
+                                lane.len(),
+                                MELODIC_AUTOMATION_LANE_LEN,
+                                "{name} {kind} t{t} p{p} lane{l} length"
+                            );
+                            assert_eq!(
+                                lane.len(),
+                                192,
+                                "{name} {kind} t{t} p{p} lane{l} length literal"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// validate() routes the melodic per-pattern tail through its range checks for
+    /// BOTH the synth and midi blocks: an out-of-range synth sync_rate (8 > 7) is
+    /// reported naming 'synth' and 'sync_rate', and -- on a fresh clean session --
+    /// an out-of-range midi playback_start (32 > 31) is reported naming 'midi' and
+    /// 'playback_start'. Re-parsing between the two mutations keeps them
+    /// independent, so each assertion proves its own block+field is wired, not
+    /// that some other tail check fired. The synth/midi split proves both blocks
+    /// route through validate_melodic with the correct kind prefix.
+    #[test]
+    fn melodic_tail_validation_reports_bad() {
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.synth.tracks[0].patterns[0].sync_rate = 8;
+        let sync = sess.validate();
+        assert!(
+            sync.iter().any(|m| m.contains("synth") && m.contains("sync_rate")),
+            "synth sync_rate=8 (> 7) must be reported naming 'synth' and 'sync_rate', got {:?}",
+            sync
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.midi.tracks[0].patterns[0].playback_start = 32;
+        let start = sess.validate();
+        assert!(
+            start.iter().any(|m| m.contains("midi") && m.contains("playback_start")),
+            "midi playback_start=32 (> 31) must be reported naming 'midi' and 'playback_start', got {:?}",
+            start
+        );
+    }
+
+    /// The still-undecoded gap (+900..=+935, no validator yet) is carried as a
+    /// fixed 36-byte block for round-trip fidelity. Beyond documenting the width
+    /// (36 == 935-900+1), prove the carried bytes are the actual file bytes at the
+    /// gap offset for synth track0/pattern0 (stepInfo base == SYNTH_BASE, so
+    /// pat_base == SYNTH_BASE) -- an off-by-one in the gap loop or a shifted base
+    /// would read the wrong 36 bytes and redden here.
+    #[test]
+    fn melodic_unknown_gap_is_36() {
+        let raw = load("Deep.ncs");
+        let deep = Session::parse(&raw).expect("Deep.ncs must parse");
+        let pat = &deep.synth.tracks[0].patterns[0];
+
+        assert_eq!(pat.unknown_900_935.len(), 36, "unknown gap must carry 36 bytes");
+        assert_eq!(935 - 900 + 1, 36, "gap +900..=+935 spans 36 bytes");
+
+        let gap_off = SYNTH_BASE + 900;
+        assert_eq!(
+            &pat.unknown_900_935[..],
+            &raw[gap_off..gap_off + 36],
+            "unknown_900_935 must carry the raw file bytes at +900..=+935"
+        );
+    }
+
+    /// Regression guard for the newly-added melodic-tail range checks: both real,
+    /// valid files must still validate() clean. If a melodic-tail bound is decoded
+    /// wrong (or a check is too strict), one of these genuinely valid sessions
+    /// would report a spurious violation here.
+    #[test]
+    fn real_files_validate_clean_with_tails() {
         for name in ["Deep.ncs", "Funk.ncs"] {
             let session = Session::parse(&load(name)).expect("sample must parse");
             let violations = session.validate();

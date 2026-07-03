@@ -97,15 +97,35 @@ types:
         repeat-expr: 8
 
   melodic_pattern:
-    # pattern stride 3240 = 32 steps * 28 (=896) + 2344-byte tail
-    # (playbackRange / syncRate / playbackDirection / automation — pending decode)
+    # 3240 bytes: 32 steps (896) + tail. Tail VERIFIED from f_kt/f_ft/f_xs/f_ms
+    # (relative to step 0): playbackRange +896/+897 (0..31), syncRate +898 (0..7),
+    # playbackDirection +899 (0..3), unknown +900..935 (36B, no validator),
+    # automation +936: 12 lanes x 192 (NB: 12 lanes for melodic, vs 8 for drums).
     seq:
       - id: steps
         type: melodic_step
         repeat: expr
         repeat-expr: 32
-      - id: pattern_tail
-        size: 3240 - 32 * 28
+      - id: playback_start
+        type: u1
+        valid: { min: 0, max: 31 }
+      - id: playback_end
+        type: u1
+        valid: { min: 0, max: 31 }
+      - id: sync_rate
+        type: u1
+        valid: { min: 0, max: 7 }
+      - id: playback_direction
+        type: u1
+        valid: { min: 0, max: 3 }
+      - id: unknown_900_935
+        size: 36
+        doc: no validator — carried raw (pending decode)
+      - id: automation
+        size: 192
+        repeat: expr
+        repeat-expr: 12
+        doc: 12 lanes x 192 bytes; values allowlist-checked by f_ms
 
   melodic_step:
     # 28 bytes per step, laid out: assigned_note_mask(+0), probability(+1),

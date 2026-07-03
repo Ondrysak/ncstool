@@ -48,6 +48,19 @@ stepinfo_note_mask   = 0   # MIDI_BASE-relative +0, range 0..63  (VERIFIED 512/5
 stepinfo_probability = 1   # +1, range 0..7                       (VERIFIED 512/512)
 note_number = 4            # +4 + N*4, then +1 gate / +2 delay / +3 velocity (same as synth)
 
+[verified.melodic_pattern_tail]  # synth (f_kt/f_ft/f_xs/f_ms) AND midi — same layout
+# Per-pattern, offsets relative to the pattern's stepInfo start (step 0).
+# Steps occupy +0..+895 (32*28); tail follows:
+playback_start     = 896  # +896, range 0..31  (f_kt reads +896 and +897)
+playback_end       = 897  # +897, range 0..31
+sync_rate          = 898  # +898, range 0..7   (f_ft)
+playback_direction = 899  # +899, range 0..3   (f_xs)
+unknown_gap        = 900  # +900..+935 (36 bytes) — NO validator, carried raw
+automation_base    = 936  # +936; f_ms: 12 lanes x 192 = 2304, ends at +3239
+automation_lanes   = 12   # NB: melodic = 12 lanes (drums = 8)
+automation_lane_len = 192 # allowlist-checked, not a simple range
+# closure: 896 + 2 + 1 + 1 + 36 + 12*192 = 3240 == pattern_stride
+
 [verified.drum_patterns]   # validator f_vr: base+track*13632+pattern*1704+step, plane @+52596
 velocity     = 0xCD74    # VERIFIED (index formula matches validator exactly)
 track_stride = 0x3540

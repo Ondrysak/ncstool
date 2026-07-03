@@ -587,12 +587,12 @@ fn run_analyze(file_path: &str) -> io::Result<()> {
         + (16 * 8 * 4)  // scenes table
         + 4             // scene chain
         + (8 * 4)       // pattern chains
-        + (2 * 8 * 32 * 28)  // synth steps fully typed: 28 bytes/step
-        + (2 * 8 * 32 * 28)  // midi steps fully typed: 28 bytes/step
-        + (4 * 8 * (2 + 1 + 1 + 8 * 192)); // drum tail/pattern: playbackRange+sync+dir+automation (gap +132..167 NOT counted)
+        // synth+midi: steps (28*32) + tail (playback 2 + sync 1 + dir 1 + automation 12*192); gap +900..935 NOT counted
+        + (2 * (2 * 8 * (32 * 28 + 2 + 1 + 1 + 12 * 192)))
+        + (4 * 8 * (2 + 1 + 1 + 8 * 192)); // drum tail/pattern (gap +132..167 NOT counted)
     let total = data.len();
     println!(
-        "Known bytes: {} / {} ({:.2}%) | typed: timing, synth+midi(stepInfo+notes), drums(+tail/automation), scale, fx; legacy: scenes+chains",
+        "Parsed/carried bytes: {} / {} ({:.2}%) | typed: timing, synth+midi(steps+tail), drums(+tail), scale, fx; automation carried RAW (values not allowlist-checked); legacy: scenes+chains; ~2.7% still unmapped (per-pattern 36B gaps, track_info, octaves, header)",
         known, total, (known as f64) * 100.0 / (total.max(1) as f64)
     );
 
