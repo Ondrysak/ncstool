@@ -22,7 +22,13 @@ seq:
   # byte-exact tail boundaries not yet verified.
 
 instances:
-  # ---- timing (VERIFIED tempo range) ----
+  # ---- header (VERIFIED: file size at +4) ----
+  file_size:
+    pos: 4
+    type: u4
+    doc: must equal 160780 (0x2740C); validated by f_tu
+
+  # ---- timing (VERIFIED tempo range; others from main.rs) ----
   tempo:
     pos: 0x34
     type: u1
@@ -35,6 +41,12 @@ instances:
   swing_sync_rate:
     pos: 0x36
     type: u1
+  timing_spare1:
+    pos: 0x38
+    type: u4
+  timing_spare2:
+    pos: 0x3c
+    type: u4
 
   # ---- drums: 4 planes, VERIFIED base/stride ----
   drums:
@@ -77,7 +89,56 @@ instances:
       min: 0
       max: 7
 
+  # ---- track info + drum scalars (VERIFIED) ----
+  synth_track_info:
+    pos: 0xcd64
+    type: track_info
+    repeat: expr
+    repeat-expr: 2
+    doc: 2 synth tracks; patch<128, muteState<=1, sidechainPreset<=7 (f_ds)
+  midi_track_info:
+    pos: 0x26cfc
+    type: track_info
+    repeat: expr
+    repeat-expr: 2
+    doc: 2 midi tracks; patch<=7, muteState<=1, sidechainPreset<=7 (f_yn)
+  drum_mute_states:
+    pos: 0x1a274
+    type: u1
+    repeat: expr
+    repeat-expr: 4
+    doc: per drum track, 0..1 (f_aq)
+  default_drum_choices:
+    pos: 0x1a278
+    type: u1
+    repeat: expr
+    repeat-expr: 4
+    doc: per drum track, 0..64 (f_pp)
+  midi_keyboard_octaves:
+    pos: 0x26d10
+    type: u1
+    repeat: expr
+    repeat-expr: 2
+    doc: per midi track; f_cn allowlist (range not asserted here)
+
 types:
+  # ---------- track info record (8-byte stride) ----------
+  track_info:
+    doc: 8-byte record; patch @+0, reserved +1, muteState @+2, sidechainPreset @+3, reserved +4..7
+    seq:
+      - id: patch
+        type: u1
+      - id: reserved1
+        size: 1
+      - id: mute_state
+        type: u1
+        valid: { min: 0, max: 1 }
+      - id: sidechain_preset
+        type: u1
+        valid: { min: 0, max: 7 }
+      - id: reserved2
+        size: 4
+
   # ---------- synth / midi patterns ----------
   melodic_block:
     params:

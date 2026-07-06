@@ -14,15 +14,6 @@ fn err(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.to_string())
 }
 
-/// Read a u8 with bounds check.
-fn u8_at(d: &[u8], off: usize) -> io::Result<u8> {
-    d.get(off).copied().ok_or_else(|| err("offset past end of file"))
-}
-
-fn u32le_at(d: &[u8], off: usize) -> io::Result<u32> {
-    let b = d.get(off..off + 4).ok_or_else(|| err("u32 past end of file"))?;
-    Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-}
 
 // ---------------- timing ----------------
 
@@ -35,25 +26,12 @@ pub struct Timing {
     pub spare2: u32,
 }
 
-impl Timing {
-    pub fn parse(d: &[u8]) -> io::Result<Self> {
-        Ok(Timing {
-            tempo: u8_at(d, 0x34)?,
-            swing: u8_at(d, 0x35)?,
-            swing_sync_rate: u8_at(d, 0x36)?,
-            spare1: u32le_at(d, 0x38)?,
-            spare2: u32le_at(d, 0x3C)?,
-        })
-    }
-}
-
-// ---------------- synth / midi patterns (VERIFIED geometry) ----------------
-
-pub const SYNTH_BASE: usize = 0x2E4;    // absolute offset of synth track0/pat0/step0 stepInfo
-pub const MIDI_BASE: usize = 0x1A27C;   // 107132 — absolute offset of midi stepInfo block
-pub const SYNTH_TRACK_STRIDE: usize = 25_920;
-pub const PATTERN_STRIDE_SYNTH: usize = 3_240;
-pub const STEP_STRIDE: usize = 28;
+// ---------------- synth / midi patterns ----------------
+// Byte offsets/strides now live ONLY in decompiled_validators/ncs.ksy (the parser
+// is generated from it). The absolute offsets below are kept for tests that
+// cross-check the generated parser against raw file bytes.
+#[cfg(test)]
+pub const SYNTH_BASE: usize = 0x2E4;
 pub const NOTES_PER_STEP: usize = 6;
 
 /// One note within a synth/midi step. 4 bytes: {noteNumber, gate, delay, velocity}.
@@ -83,23 +61,6 @@ pub struct MelodicStep {
 }
 
 impl MelodicStep {
-    /// `field_base` is the absolute offset of this step's stepInfo (note_mask byte).
-    fn parse(d: &[u8], field_base: usize) -> io::Result<Self> {
-        let note_mask = u8_at(d, field_base)?;
-        let probability = u8_at(d, field_base + 1)?;
-        let mut notes = [Note { note_number: 0, gate: 0, delay: 0, velocity: 0 }; NOTES_PER_STEP];
-        for (n, note) in notes.iter_mut().enumerate() {
-            let b = field_base + 4 + n * 4;
-            *note = Note {
-                note_number: u8_at(d, b)?,
-                gate: u8_at(d, b + 1)?,
-                delay: u8_at(d, b + 2)?,
-                velocity: u8_at(d, b + 3)?,
-            };
-        }
-        Ok(MelodicStep { note_mask, probability, notes })
-    }
-
     /// Notes the mask marks active.
     pub fn active_notes(&self) -> impl Iterator<Item = &Note> {
         self.notes
@@ -126,57 +87,15 @@ pub struct MelodicPattern {
     pub automation: Vec<[u8; MELODIC_AUTOMATION_LANE_LEN]>, // 12 lanes x 192 @+936
 }
 
-pub const MELODIC_AUTOMATION_LANES: usize = 12;
-pub const MELODIC_AUTOMATION_LANE_LEN: usize = 192;
-const MELODIC_TAIL_PLAYBACK: usize = 896;
-const MELODIC_TAIL_AUTOMATION: usize = 936;
+pub const MELODIC_AUTOMATION_LANE_LEN: usize = 192; // used by the converter
+#[cfg(test)]
+pub const MELODIC_AUTOMATION_LANES: usize = 12; // test cross-check (melodic = 12 lanes)
 
 #[derive(Debug, Clone)]
 pub struct MelodicTrack {
     pub patterns: Vec<MelodicPattern>, // 8
 }
 
-/// Parse a melodic block (synth or midi): 2 tracks x 8 patterns x 32 steps + tail.
-/// `block_base` is the absolute offset of track0/pattern0/step0's stepInfo.
-fn parse_melodic_block(d: &[u8], block_base: usize) -> io::Result<Vec<MelodicTrack>> {
-    const TRACKS: usize = 2;
-    const PATTERNS: usize = 8;
-    const STEPS: usize = 32;
-    let mut tracks = Vec::with_capacity(TRACKS);
-    for t in 0..TRACKS {
-        let mut patterns = Vec::with_capacity(PATTERNS);
-        for p in 0..PATTERNS {
-            let pat_base = block_base + t * SYNTH_TRACK_STRIDE + p * PATTERN_STRIDE_SYNTH;
-            let mut steps = Vec::with_capacity(STEPS);
-            for s in 0..STEPS {
-                steps.push(MelodicStep::parse(d, pat_base + s * STEP_STRIDE)?);
-            }
-            let playback_start = u8_at(d, pat_base + MELODIC_TAIL_PLAYBACK)?;
-            let playback_end = u8_at(d, pat_base + MELODIC_TAIL_PLAYBACK + 1)?;
-            let sync_rate = u8_at(d, pat_base + 898)?;
-            let playback_direction = u8_at(d, pat_base + 899)?;
-            let mut unknown_900_935 = [0u8; 36];
-            for (i, slot) in unknown_900_935.iter_mut().enumerate() {
-                *slot = u8_at(d, pat_base + 900 + i)?;
-            }
-            let mut automation = Vec::with_capacity(MELODIC_AUTOMATION_LANES);
-            for lane in 0..MELODIC_AUTOMATION_LANES {
-                let mut vals = [0u8; MELODIC_AUTOMATION_LANE_LEN];
-                let lane_base = pat_base + MELODIC_TAIL_AUTOMATION + lane * MELODIC_AUTOMATION_LANE_LEN;
-                for (v, slot) in vals.iter_mut().enumerate() {
-                    *slot = u8_at(d, lane_base + v)?;
-                }
-                automation.push(vals);
-            }
-            patterns.push(MelodicPattern {
-                steps, playback_start, playback_end, sync_rate, playback_direction,
-                unknown_900_935, automation,
-            });
-        }
-        tracks.push(MelodicTrack { patterns });
-    }
-    Ok(tracks)
-}
 
 #[derive(Debug, Clone)]
 pub struct SynthData {
@@ -187,9 +106,6 @@ impl SynthData {
     pub const TRACKS: usize = 2;
     pub const PATTERNS: usize = 8;
     pub const STEPS: usize = 32;
-    pub fn parse(d: &[u8]) -> io::Result<Self> {
-        Ok(SynthData { tracks: parse_melodic_block(d, SYNTH_BASE)? })
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -201,19 +117,12 @@ impl MidiData {
     pub const TRACKS: usize = 2;
     pub const PATTERNS: usize = 8;
     pub const STEPS: usize = 32;
-    pub fn parse(d: &[u8]) -> io::Result<Self> {
-        Ok(MidiData { tracks: parse_melodic_block(d, MIDI_BASE)? })
-    }
 }
 
-// ---------------- drum patterns (VERIFIED geometry, 4 planes) ----------------
-
+// ---------------- drum patterns (4 planes) ----------------
+// Offsets live in ncs.ksy; kept here only for the test cross-check.
+#[cfg(test)]
 pub const DRUM_VELOCITY: usize = 0xCD74;
-pub const DRUM_PROBABILITY: usize = 0xCD94; // inferred
-pub const DRUM_CHOICE: usize = 0xCDB4; // inferred
-pub const DRUM_RHYTHM: usize = 0xCDD4; // inferred
-pub const DRUM_TRACK_STRIDE: usize = 0x3540;
-pub const PATTERN_STRIDE_DRUM: usize = 0x6A8;
 
 #[derive(Debug, Clone, Copy)]
 pub struct DrumStep {
@@ -239,10 +148,9 @@ pub struct DrumPattern {
     pub automation: Vec<[u8; 192]>, // 8 lanes x 192 values @+168
 }
 
-pub const AUTOMATION_LANES: usize = 8;
-pub const AUTOMATION_LANE_LEN: usize = 192;
-pub const DRUM_TAIL_PLAYBACK_START: usize = 128;
-pub const DRUM_TAIL_AUTOMATION: usize = 168;
+pub const AUTOMATION_LANE_LEN: usize = 192; // used by the converter
+#[cfg(test)]
+pub const AUTOMATION_LANES: usize = 8; // test cross-check (drum = 8 lanes)
 
 #[derive(Debug, Clone)]
 pub struct DrumTrack {
@@ -258,51 +166,6 @@ impl DrumData {
     pub const TRACKS: usize = 4;
     pub const PATTERNS: usize = 8;
     pub const STEPS: usize = 32;
-
-    pub fn parse(d: &[u8]) -> io::Result<Self> {
-        let mut tracks = Vec::with_capacity(Self::TRACKS);
-        for t in 0..Self::TRACKS {
-            let mut patterns = Vec::with_capacity(Self::PATTERNS);
-            for p in 0..Self::PATTERNS {
-                let pat_base = t * DRUM_TRACK_STRIDE + p * PATTERN_STRIDE_DRUM;
-                let mut steps = Vec::with_capacity(Self::STEPS);
-                for s in 0..Self::STEPS {
-                    let idx = pat_base + s;
-                    steps.push(DrumStep {
-                        velocity: u8_at(d, DRUM_VELOCITY + idx)?,
-                        probability: u8_at(d, DRUM_PROBABILITY + idx)?,
-                        choice: u8_at(d, DRUM_CHOICE + idx)?,
-                        rhythm: u8_at(d, DRUM_RHYTHM + idx)?,
-                    });
-                }
-                // tail: offsets relative to the velocity-plane base for this pattern
-                let tail = DRUM_VELOCITY + pat_base;
-                let playback_start = u8_at(d, tail + DRUM_TAIL_PLAYBACK_START)?;
-                let playback_end = u8_at(d, tail + DRUM_TAIL_PLAYBACK_START + 1)?;
-                let sync_rate = u8_at(d, tail + 130)?;
-                let playback_direction = u8_at(d, tail + 131)?;
-                let mut unknown_132_167 = [0u8; 36];
-                for (i, slot) in unknown_132_167.iter_mut().enumerate() {
-                    *slot = u8_at(d, tail + 132 + i)?;
-                }
-                let mut automation = Vec::with_capacity(AUTOMATION_LANES);
-                for lane in 0..AUTOMATION_LANES {
-                    let mut vals = [0u8; AUTOMATION_LANE_LEN];
-                    let lane_base = tail + DRUM_TAIL_AUTOMATION + lane * AUTOMATION_LANE_LEN;
-                    for (v, slot) in vals.iter_mut().enumerate() {
-                        *slot = u8_at(d, lane_base + v)?;
-                    }
-                    automation.push(vals);
-                }
-                patterns.push(DrumPattern {
-                    steps, playback_start, playback_end, sync_rate, playback_direction,
-                    unknown_132_167, automation,
-                });
-            }
-            tracks.push(DrumTrack { patterns });
-        }
-        Ok(DrumData { tracks })
-    }
 }
 
 // ---------------- global scalars ----------------
@@ -330,21 +193,8 @@ pub struct TrackInfo {
     pub sidechain_preset: u8,
 }
 
-pub const SYNTH_TRACK_INFO_BASE: usize = 0xCD64;
-pub const DRUM_MUTE_BASE: usize = 0x1A274;       // 4 tracks, bool 0..1
-pub const DEFAULT_DRUM_CHOICE_BASE: usize = 0x1A278; // 4 tracks, 0..64
-pub const MIDI_TRACK_INFO_BASE: usize = 0x26CFC;
-pub const MIDI_OCTAVE_BASE: usize = 0x26D10;     // 2 tracks
-
-impl TrackInfo {
-    fn parse(d: &[u8], base: usize) -> io::Result<Self> {
-        Ok(TrackInfo {
-            patch: u8_at(d, base)?,
-            mute_state: u8_at(d, base + 2)?,
-            sidechain_preset: u8_at(d, base + 3)?,
-        })
-    }
-}
+#[cfg(test)]
+pub const SYNTH_TRACK_INFO_BASE: usize = 0xCD64; // test cross-check only
 
 // ---------------- top-level session ----------------
 
@@ -409,40 +259,160 @@ fn validate_melodic(kind: &str, tracks: &[MelodicTrack], v: &mut Vec<String>) {
 }
 
 
+/// Map a kaitai error into our io::Error.
+fn kerr(e: kaitai::KError) -> io::Error {
+    err(&format!("kaitai: {:?}", e))
+}
+
+fn conv_track_info(k: &crate::kaitai::ncs_session::NcsSession_TrackInfo) -> TrackInfo {
+    TrackInfo {
+        patch: *k.patch(),
+        mute_state: *k.mute_state(),
+        sidechain_preset: *k.sidechain_preset(),
+    }
+}
+
+fn conv_melodic(
+    block: &kaitai::OptRc<crate::kaitai::ncs_session::NcsSession_MelodicBlock>,
+) -> io::Result<Vec<MelodicTrack>> {
+    let mut tracks = Vec::new();
+    for kt in block.tracks().iter() {
+        let mut patterns = Vec::new();
+        for kp in kt.patterns().iter() {
+            let mut steps = Vec::new();
+            for ks in kp.steps().iter() {
+                let mut notes = [Note { note_number: 0, gate: 0, delay: 0, velocity: 0 }; NOTES_PER_STEP];
+                for (i, kn) in ks.notes().iter().enumerate() {
+                    notes[i] = Note {
+                        note_number: *kn.note_number(),
+                        gate: *kn.gate(),
+                        delay: *kn.delay(),
+                        velocity: *kn.velocity(),
+                    };
+                }
+                steps.push(MelodicStep {
+                    note_mask: *ks.assigned_note_mask(),
+                    probability: *ks.probability(),
+                    notes,
+                });
+            }
+            let mut unknown_900_935 = [0u8; 36];
+            unknown_900_935.copy_from_slice(&kp.unknown_900_935()[..36]);
+            let automation = kp.automation().iter().map(|lane| {
+                let mut a = [0u8; MELODIC_AUTOMATION_LANE_LEN];
+                a.copy_from_slice(&lane[..MELODIC_AUTOMATION_LANE_LEN]);
+                a
+            }).collect();
+            patterns.push(MelodicPattern {
+                steps,
+                playback_start: *kp.playback_start(),
+                playback_end: *kp.playback_end(),
+                sync_rate: *kp.sync_rate(),
+                playback_direction: *kp.playback_direction(),
+                unknown_900_935,
+                automation,
+            });
+        }
+        tracks.push(MelodicTrack { patterns });
+    }
+    Ok(tracks)
+}
+
+fn conv_drums(
+    block: &kaitai::OptRc<crate::kaitai::ncs_session::NcsSession_DrumBlock>,
+) -> io::Result<Vec<DrumTrack>> {
+    let mut tracks = Vec::new();
+    for kt in block.tracks().iter() {
+        let mut patterns = Vec::new();
+        for kp in kt.patterns().iter() {
+            let vel = kp.velocity();
+            let prob = kp.probability();
+            let choice = kp.drum_choice();
+            let rhythm = kp.drum_rhythm();
+            let steps = (0..DrumData::STEPS).map(|s| DrumStep {
+                velocity: vel[s], probability: prob[s], choice: choice[s], rhythm: rhythm[s],
+            }).collect();
+            let mut unknown_132_167 = [0u8; 36];
+            unknown_132_167.copy_from_slice(&kp.unknown_132_167()[..36]);
+            let automation = kp.automation().iter().map(|lane| {
+                let mut a = [0u8; AUTOMATION_LANE_LEN];
+                a.copy_from_slice(&lane[..AUTOMATION_LANE_LEN]);
+                a
+            }).collect();
+            patterns.push(DrumPattern {
+                steps,
+                playback_start: *kp.playback_start(),
+                playback_end: *kp.playback_end(),
+                sync_rate: *kp.sync_rate(),
+                playback_direction: *kp.playback_direction(),
+                unknown_132_167,
+                automation,
+            });
+        }
+        tracks.push(DrumTrack { patterns });
+    }
+    Ok(tracks)
+}
+
 impl Session {
+    /// Parse a `.ncs` by running the Kaitai-generated parser (all byte offsets live
+    /// in `decompiled_validators/ncs.ksy`) and converting into this owned model.
     pub fn parse(d: &[u8]) -> io::Result<Self> {
         if d.len() != FILE_SIZE {
             return Err(err("not a Circuit Tracks .ncs (expected 160780 bytes)"));
         }
-        let u32le = |off: usize| -> io::Result<u32> {
-            let b = d.get(off..off + 4).ok_or_else(|| err("u32 past end"))?;
-            Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        use crate::kaitai::ncs_session::NcsSession as K;
+        use kaitai::{BytesReader, KStruct};
+        let reader = BytesReader::from(d);
+        let k: kaitai::OptRc<K> = K::read_into(&reader, None, None)
+            .map_err(|e| err(&format!("kaitai parse failed: {:?}", e)))?;
+
+        let synth = conv_melodic(&*k.synth().map_err(kerr)?)?;
+        let midi = conv_melodic(&*k.midi().map_err(kerr)?)?;
+        let drums = conv_drums(&*k.drums().map_err(kerr)?)?;
+        let synth_track_info = {
+            let sti = k.synth_track_info().map_err(kerr)?;
+            [conv_track_info(&sti[0]), conv_track_info(&sti[1])]
         };
+        let midi_track_info = {
+            let mti = k.midi_track_info().map_err(kerr)?;
+            [conv_track_info(&mti[0]), conv_track_info(&mti[1])]
+        };
+        let drum_mute_states = {
+            let m = k.drum_mute_states().map_err(kerr)?;
+            [m[0], m[1], m[2], m[3]]
+        };
+        let default_drum_choices = {
+            let c = k.default_drum_choices().map_err(kerr)?;
+            [c[0], c[1], c[2], c[3]]
+        };
+        let midi_keyboard_octaves = {
+            let o = k.midi_keyboard_octaves().map_err(kerr)?;
+            [o[0], o[1]]
+        };
+        let timing = Timing {
+            tempo: *k.tempo().map_err(kerr)?,
+            swing: *k.swing().map_err(kerr)?,
+            swing_sync_rate: *k.swing_sync_rate().map_err(kerr)?,
+            spare1: *k.timing_spare1().map_err(kerr)?,
+            spare2: *k.timing_spare2().map_err(kerr)?,
+        };
+        let file_size = *k.file_size().map_err(kerr)?;
+        let scale = Scale { root: *k.scale_root().map_err(kerr)?, scale_type: *k.scale_type().map_err(kerr)? };
+        let fx = Fx { delay_preset: *k.delay_preset().map_err(kerr)?, reverb_preset: *k.reverb_preset().map_err(kerr)? };
         Ok(Session {
-            file_size: u32le(4)?,
-            timing: Timing::parse(d)?,
-            synth: SynthData::parse(d)?,
-            midi: MidiData::parse(d)?,
-            drums: DrumData::parse(d)?,
-            synth_track_info: [
-                TrackInfo::parse(d, SYNTH_TRACK_INFO_BASE)?,
-                TrackInfo::parse(d, SYNTH_TRACK_INFO_BASE + 8)?,
-            ],
-            midi_track_info: [
-                TrackInfo::parse(d, MIDI_TRACK_INFO_BASE)?,
-                TrackInfo::parse(d, MIDI_TRACK_INFO_BASE + 8)?,
-            ],
-            drum_mute_states: [
-                u8_at(d, DRUM_MUTE_BASE)?, u8_at(d, DRUM_MUTE_BASE + 1)?,
-                u8_at(d, DRUM_MUTE_BASE + 2)?, u8_at(d, DRUM_MUTE_BASE + 3)?,
-            ],
-            default_drum_choices: [
-                u8_at(d, DEFAULT_DRUM_CHOICE_BASE)?, u8_at(d, DEFAULT_DRUM_CHOICE_BASE + 1)?,
-                u8_at(d, DEFAULT_DRUM_CHOICE_BASE + 2)?, u8_at(d, DEFAULT_DRUM_CHOICE_BASE + 3)?,
-            ],
-            midi_keyboard_octaves: [u8_at(d, MIDI_OCTAVE_BASE)?, u8_at(d, MIDI_OCTAVE_BASE + 1)?],
-            scale: Scale { root: u8_at(d, 0x26D0C)?, scale_type: u8_at(d, 0x26D0D)? },
-            fx: Fx { delay_preset: u8_at(d, 0x26D0E)?, reverb_preset: u8_at(d, 0x26D0F)? },
+            file_size,
+            timing,
+            synth: SynthData { tracks: synth },
+            midi: MidiData { tracks: midi },
+            drums: DrumData { tracks: drums },
+            synth_track_info,
+            midi_track_info,
+            drum_mute_states,
+            default_drum_choices,
+            midi_keyboard_octaves,
+            scale,
+            fx,
         })
     }
 

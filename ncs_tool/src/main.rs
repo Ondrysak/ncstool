@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{self, Read};
 
+mod kaitai;
 mod session;
 
 const TRACKS: usize = 4;
