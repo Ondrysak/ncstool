@@ -1,116 +1,159 @@
 # ncstool
-Novation Circuit Tracks tool for analyzing and editing NCS session files.
+
+Rust tooling for Novation Circuit Tracks `.ncs` session files and
+`.circuittrackspack` packs.
+
+The parser is generated from `decompiled_validators/ncs.ksy`; the `.ksy` is the
+single source of truth for byte offsets. The generated Rust parser is committed,
+so normal builds do **not** require Java or Kaitai Struct Compiler.
 
 ## Features
 
-- **Analyze NCS files**: Parse and display drum patterns, timing, FX settings, and more
-- **Clone and Edit**: Create new NCS files with modified drum patterns using a simple text format
-- **Pattern Visualization**: ASCII visualization of drum patterns with velocity and probability
-- **Comprehensive Parsing**: Support for timing, FX, scenes, chains, and scale settings
+- **Analyze `.ncs` sessions**: prints timing, scale, FX, scenes/chains, synth/MIDI
+  pattern summaries, and drum pattern ASCII.
+- **Clone + edit drum patterns**: copies a session and applies
+  `track:pattern:steps[:probability]` edits before writing.
+- **Browse `.circuittrackspack` files**: opens the pack ZIP, reads `index.json`,
+  parses each present project, and resolves drum sample / synth patch indices to
+  human-readable names.
+- **Validator-derived parser**: all known validated regions are typed through
+  Kaitai-generated Rust; unknown 36-byte per-pattern gaps are carried raw instead
+  of guessed.
 
-## Quick Start
+## Build
 
-### Build the tool
 ```bash
 cd ncs_tool
 cargo build --release
 ```
 
-### Analyze an NCS file
+The binary is `ncs_tool/target/release/ncs-tui`.
+
+## Commands
+
+### Analyze a session
+
 ```bash
-./target/release/ncs-tui your_file.ncs
+./target/release/ncs-tui path/to/session.ncs
 ```
 
-### Clone and edit patterns
-```bash
-# Create a new file with modified drum patterns
-./target/release/ncs-tui clone source.ncs target.ncs "0:0:X...X...X...X..."
+Output includes:
 
-# Multiple pattern edits
+- parsed/carried coverage;
+- timing / scale / FX;
+- scenes and pattern chains;
+- synth and MIDI pattern summaries;
+- drum pattern ASCII with probability digits.
+
+### Clone and edit drum patterns
+
+```bash
+./target/release/ncs-tui clone source.ncs target.ncs "0:0:X...X...X...X..."
+```
+
+Multiple edits can be applied in one clone:
+
+```bash
 ./target/release/ncs-tui clone source.ncs target.ncs \
   "0:0:X...X...X...X..." \
   "1:0:....X.......X..." \
-  "2:0:x.x.x.x.x.x.x.x."
+  "2:0:x.x.x.x.x.x.x.x.:5"
 ```
 
-## Pattern Format
+The edit path parses the mutated session and runs the typed validation subset
+before writing the target file. Invalid edits fail before producing a partial
+output file.
 
-The sequencer format uses: `track:pattern:steps[:probability]`
-
-### Step Characters
-- `X` = Strong hit (velocity 127)
-- `x` = Weak hit (velocity 32)
-- `.` = Rest (velocity 0)
-- `0-9` = Specific velocity levels (0, 14, 28, 42, 56, 70, 84, 98, 112, 127)
-
-### Examples
-```bash
-# Basic kick pattern on track 0, pattern 0
-"0:0:X...X...X...X..."
-
-# Hi-hat with probability 7
-"1:0:x.x.x.x.x.x.x.x.:7"
-
-# Complex pattern with varying velocities
-"0:0:9.5.7.3.9.5.7.3."
-```
-
-## Examples
-
-See the `examples/` directory for:
-- `pattern_editing_examples.md` - Comprehensive pattern editing guide
-- `create_patterns.sh` - Script to generate common drum patterns
-
-## Python CLI (Legacy)
-
-The Python CLI tool provides additional analysis capabilities:
+### Browse a Circuit Tracks pack
 
 ```bash
-# Extract drum patterns to JSON
-python cli.py drums extract your_file.ncs --json output.json
-
-# Display ASCII patterns
-python cli.py drums extract your_file.ncs
+./target/release/ncs-tui pack "DLR  Sofa Sound.circuittrackspack"
 ```
 
-## File Structure
+Pack support expects the Novation Components ZIP layout:
 
-- `ncs_tool/` - Main Rust tool for analysis and editing
-- `cli.py` - Python CLI for additional analysis
-- `examples/` - Usage examples and pattern libraries
-- `test_data/` - Sample NCS files for testing
-- `decompiled_validators/` - Reverse engineering documentation
+```text
+index.json
+projects/project_N.ncs
+samples/sample_N.wav
+patches/patch_N.syx
+```
+
+The command processes only project entries that are actually present in the ZIP
+and resolves:
+
+- `default_drum_choices` / drum choice indices -> `samples[]` names;
+- `synth_track_info.patch` indices -> `patches[]` names.
+
+## Drum pattern edit format
+
+`track:pattern:steps[:probability]`
+
+- `track`: drum track `0..3`
+- `pattern`: pattern `0..7`
+- `steps`: up to 32 step characters
+- `probability`: optional single digit `0..9`; applied to played steps
+
+### Step characters
+
+| Character | Meaning |
+|-----------|---------|
+| `X` | strong hit, velocity `127` |
+| `x` | weak hit, velocity `32` |
+| `.` | rest, velocity `0`, probability forced to `0` |
+| `0`..`9` | velocity levels `0, 14, 28, 42, 56, 70, 84, 98, 112, 127` |
+
+Examples:
+
+```text
+0:0:X...X...X...X...
+1:0:x.x.x.x.x.x.x.x.:7
+0:0:9.5.7.3.9.5.7.3.
+```
+
+## Repository layout
+
+- `ncs_tool/` — Rust CLI crate (`ncs-tui` binary).
+- `ncs_tool/src/kaitai/ncs_session.rs` — generated parser; do not edit by hand.
+- `ncs_tool/src/session.rs` — typed owned session model + validation adapter.
+- `ncs_tool/src/pack.rs` — `.circuittrackspack` ZIP / manifest support.
+- `decompiled_validators/ncs.ksy` — authoritative Kaitai spec.
+- `decompiled_validators/FORMAT_MAP.md` — validator-derived format notes.
+- `decompiled_validators/offsets.toml` — verified/inferred offset audit trail.
+- `decompiled_validators/README.md` — provenance and regeneration notes for the
+  Novation validator artifact.
+- `scripts/regen_kaitai.sh` — regenerates the Rust parser from `ncs.ksy`.
+- `test_data/` — sample sessions used by tests.
 
 ## Development
 
-### Running Tests
+Run tests:
+
 ```bash
 cd ncs_tool
 cargo test
 ```
 
-### Adding New Patterns
-Edit patterns using the simple text format and test with:
-```bash
-cargo run -- clone test_data/Deep.ncs test_output.ncs "0:0:your_pattern_here"
-```
-
-## Ghidra MCP Integration
-
-For reverse engineering work:
-
-Install `uv` and https://github.com/LaurieWired/GhidraMCP
+Regenerate the parser after changing `decompiled_validators/ncs.ksy`:
 
 ```bash
-uv run C:\Users\Ondra\Downloads\ghidra_11.3.2_PUBLIC\Extensions\GhidraMCP-release-1-4\bridge_mcp_ghidra.py --transport sse --mcp-host 127.0.0.1 --mcp-port 8081 --ghidra-server http://127.0.0.1:8080
+cd ..
+KSC=/path/to/kaitai-struct-compiler scripts/regen_kaitai.sh
+cd ncs_tool
+cargo test
 ```
 
-In Augment add: http://127.0.0.1:8081/sse
+Normal users and CI do not need the Kaitai compiler; the generated parser is
+checked in.
 
+## Format status
 
-## IDA Pro MCP 
+Current parser coverage is about **97.3% parsed/carried** for known 160,780-byte
+Circuit Tracks sessions. Remaining intentionally-unmodeled bytes:
 
-https://github.com/mrexodia/ida-pro-mcp?tab=readme-ov-file
-```bash
-uv --directory ./MCPida-pro-mcp run ida-pro-mcp --transport http://127.0.0.1:8744/sse
-```
+- per-pattern 36-byte gaps with no validator reads; carried raw for round-trip
+  fidelity;
+- header feature-flag bytes not yet decoded into the typed model.
+
+The main CLI is Rust-only. The old exploratory Python drum extractor has been
+removed so there is one maintained path through the Kaitai-backed parser.
