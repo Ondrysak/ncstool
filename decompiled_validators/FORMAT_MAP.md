@@ -24,9 +24,9 @@ File size constant in the validator: `0x2740C = 160780` — matches our samples 
 |---|---------------------------|--------------|--------|
 | 1 | header + feature flags    | f_tu | **VERIFIED** file_size@+4==160780 (feature flags pending) |
 | 2 | timing                    | f_ku | **VERIFIED** offsets+ranges |
-| 3 | scenes (16×8)             | f_hu | partial (legacy parse) |
-| 4 | scene chain               | f_cu | partial (legacy parse) |
-| 5 | pattern chain             | f_wt | partial (legacy parse) |
+| 3 | scenes (16×8)             | f_hu | **VERIFIED** start/end<=7, pad==0 (128/128) |
+| 4 | scene chain               | f_cu | **VERIFIED** start/end scene 0..15, pad==0 |
+| 5 | pattern chain             | f_wt | **VERIFIED** start/end<=7, pad==0 |
 | 6 | synth patterns — steps    | f_qt | **VERIFIED** geometry+stepInfo+notes |
 | 7–10 | synth pattern tail     | f_kt,f_ft,f_xs,f_ms | **VERIFIED** playbackRange/sync/dir/automation(12 lanes) |
 | 11 | synth track info          | f_ds | **VERIFIED** patch<128, mute<=1, sidechain<=7 |
@@ -42,9 +42,10 @@ File size constant in the validator: `0x2740C = 160780` — matches our samples 
 | 28–30 | report helpers        | f_um,f_nm,f_km | n/a |
 | 31 | root orchestrator stub    | f_fm | n/a |
 
-**Parsed/carried: ~97.3%.** Remaining unmapped: per-pattern 36-byte gaps
-(no validator; carried raw), feature-flag bytes in the header, and the
-scenes/chains region (still legacy-parsed, not yet in the typed model).
+**Parsed/carried: ~97.3%.** All 26 validators are now typed in the Kaitai spec
+(scenes/chains included). Remaining unmapped: per-pattern 36-byte gaps (no
+validator; carried raw) and the header feature-flag bytes. No legacy hand-rolled
+parser remains — the tool parses entirely via the Kaitai-generated code.
 
 ---
 

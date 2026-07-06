@@ -99,12 +99,15 @@ probability = 0xCD94
 drum_choice = 0xCDB4
 drum_rhythm = 0xCDD4
 
-[inferred.scenes]        # validator f_hu exists; geometry from main.rs
-base = 0x40 ; scene_stride = 0x28 ; entry_stride = 4 ; count = 16 ; entries_per = 8
+[verified.scenes]        # validator f_hu — VERIFIED 128/128 on both samples
+base = 0x40              # 16 scenes x 8 pattern-chain entries {start,end<=7,pad==0}
+scene_stride = 0x28      # = 8*4 entries + 8 pad bytes
+entry_stride = 4
+count = 16 ; entries_per = 8
 
-[inferred.chains]        # validators f_cu / f_wt exist; geometry from main.rs
-scene_chain_base   = 0x2C0
-pattern_chain_base = 0x2C4
+[verified.chains]        # validators f_cu (scene_chain) / f_wt (pattern_chains)
+scene_chain_base   = 0x2C0  # {start,end scene idx 0..15, pad==0}
+pattern_chain_base = 0x2C4  # 8 entries {start,end<=7, pad==0}
 pattern_chain_stride = 4
 pattern_chain_count  = 8
 

@@ -41,12 +41,18 @@ pub struct NcsSession {
     midi_keyboard_octaves: RefCell<Vec<u8>>,
     f_midi_track_info: Cell<bool>,
     midi_track_info: RefCell<Vec<OptRc<NcsSession_TrackInfo>>>,
+    f_pattern_chains: Cell<bool>,
+    pattern_chains: RefCell<Vec<OptRc<NcsSession_ChainEntry>>>,
     f_reverb_preset: Cell<bool>,
     reverb_preset: RefCell<u8>,
     f_scale_root: Cell<bool>,
     scale_root: RefCell<u8>,
     f_scale_type: Cell<bool>,
     scale_type: RefCell<u8>,
+    f_scene_chain: Cell<bool>,
+    scene_chain: RefCell<OptRc<NcsSession_ChainEntry>>,
+    f_scenes: Cell<bool>,
+    scenes: RefCell<Vec<OptRc<NcsSession_Scene>>>,
     f_swing: Cell<bool>,
     swing: RefCell<u8>,
     f_swing_sync_rate: Cell<bool>,
@@ -272,6 +278,32 @@ impl NcsSession {
         _io.seek(_pos)?;
         Ok(self.midi_track_info.borrow())
     }
+
+    /**
+     * 8 per-track pattern chains {start,end<=7, pad==0}
+     */
+    pub fn pattern_chains(
+        &self
+    ) -> KResult<Ref<'_, Vec<OptRc<NcsSession_ChainEntry>>>> {
+        let _io = self._io.borrow();
+        let _rrc = self._root.get_value().borrow().upgrade();
+        let _prc = self._parent.get_value().borrow().upgrade();
+        let _r = _rrc.as_ref().unwrap();
+        if self.f_pattern_chains.get() {
+            return Ok(self.pattern_chains.borrow());
+        }
+        self.f_pattern_chains.set(true);
+        let _pos = _io.pos();
+        _io.seek(708 as usize)?;
+        *self.pattern_chains.borrow_mut() = Vec::new();
+        let l_pattern_chains = 8;
+        for _i in 0..l_pattern_chains {
+            let t = Self::read_into::<_, NcsSession_ChainEntry>(&*_io, Some(self._root.clone()), None)?.into();
+            self.pattern_chains.borrow_mut().push(t);
+        }
+        _io.seek(_pos)?;
+        Ok(self.pattern_chains.borrow())
+    }
     pub fn reverb_preset(
         &self
     ) -> KResult<Ref<'_, u8>> {
@@ -334,6 +366,53 @@ impl NcsSession {
         *self.scale_type.borrow_mut() = _io.read_u1()?.into();
         _io.seek(_pos)?;
         Ok(self.scale_type.borrow())
+    }
+
+    /**
+     * session scene chain {start,end scene idx 0..15, pad==0}
+     */
+    pub fn scene_chain(
+        &self
+    ) -> KResult<Ref<'_, OptRc<NcsSession_ChainEntry>>> {
+        let _io = self._io.borrow();
+        let _rrc = self._root.get_value().borrow().upgrade();
+        let _prc = self._parent.get_value().borrow().upgrade();
+        let _r = _rrc.as_ref().unwrap();
+        if self.f_scene_chain.get() {
+            return Ok(self.scene_chain.borrow());
+        }
+        let _pos = _io.pos();
+        _io.seek(704 as usize)?;
+        let t = Self::read_into::<_, NcsSession_ChainEntry>(&*_io, Some(self._root.clone()), None)?.into();
+        *self.scene_chain.borrow_mut() = t;
+        _io.seek(_pos)?;
+        Ok(self.scene_chain.borrow())
+    }
+
+    /**
+     * 16 scenes, each 8 pattern-chain entries {start,end<=7, pad==0}
+     */
+    pub fn scenes(
+        &self
+    ) -> KResult<Ref<'_, Vec<OptRc<NcsSession_Scene>>>> {
+        let _io = self._io.borrow();
+        let _rrc = self._root.get_value().borrow().upgrade();
+        let _prc = self._parent.get_value().borrow().upgrade();
+        let _r = _rrc.as_ref().unwrap();
+        if self.f_scenes.get() {
+            return Ok(self.scenes.borrow());
+        }
+        self.f_scenes.set(true);
+        let _pos = _io.pos();
+        _io.seek(64 as usize)?;
+        *self.scenes.borrow_mut() = Vec::new();
+        let l_scenes = 16;
+        for _i in 0..l_scenes {
+            let t = Self::read_into::<_, NcsSession_Scene>(&*_io, Some(self._root.clone()), Some(self._self.clone()))?.into();
+            self.scenes.borrow_mut().push(t);
+        }
+        _io.seek(_pos)?;
+        Ok(self.scenes.borrow())
     }
     pub fn swing(
         &self
@@ -485,6 +564,69 @@ impl NcsSession {
     }
 }
 impl NcsSession {
+    pub fn _io(&self) -> Ref<'_, BytesReader> {
+        self._io.borrow()
+    }
+}
+
+/**
+ * {start, end, pad:u2==0}; start/end are pattern (0..7) or scene (0..15) indices
+ */
+
+#[derive(Default, Debug, Clone)]
+pub struct NcsSession_ChainEntry {
+    pub _root: SharedType<NcsSession>,
+    pub _parent: SharedType<KStructUnit>,
+    pub _self: SharedType<Self>,
+    start: RefCell<u8>,
+    end: RefCell<u8>,
+    pad: RefCell<u16>,
+    _io: RefCell<BytesReader>,
+}
+impl KStruct for NcsSession_ChainEntry {
+    type Root = NcsSession;
+    type Parent = KStructUnit;
+
+    fn read<S: KStream>(
+        self_rc: &OptRc<Self>,
+        _io: &S,
+        _root: SharedType<Self::Root>,
+        _parent: SharedType<Self::Parent>,
+    ) -> KResult<()> {
+        *self_rc._io.borrow_mut() = _io.clone();
+        self_rc._root.set(_root.get());
+        self_rc._parent.set(_parent.get());
+        self_rc._self.set(Ok(self_rc.clone()));
+        let _rrc = self_rc._root.get_value().borrow().upgrade();
+        let _prc = self_rc._parent.get_value().borrow().upgrade();
+        let _r = _rrc.as_ref().unwrap();
+        *self_rc.start.borrow_mut() = _io.read_u1()?.into();
+        *self_rc.end.borrow_mut() = _io.read_u1()?.into();
+        *self_rc.pad.borrow_mut() = _io.read_u2le()?.into();
+        if !(((*self_rc.pad() as u16) == (0 as u16))) {
+            return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::NotEqual, src_path: "/types/chain_entry/seq/2".to_string() }));
+        }
+        Ok(())
+    }
+}
+impl NcsSession_ChainEntry {
+}
+impl NcsSession_ChainEntry {
+    pub fn start(&self) -> Ref<'_, u8> {
+        self.start.borrow()
+    }
+}
+impl NcsSession_ChainEntry {
+    pub fn end(&self) -> Ref<'_, u8> {
+        self.end.borrow()
+    }
+}
+impl NcsSession_ChainEntry {
+    pub fn pad(&self) -> Ref<'_, u16> {
+        self.pad.borrow()
+    }
+}
+impl NcsSession_ChainEntry {
     pub fn _io(&self) -> Ref<'_, BytesReader> {
         self._io.borrow()
     }
@@ -1119,6 +1261,64 @@ impl NcsSession_Note {
     }
 }
 impl NcsSession_Note {
+    pub fn _io(&self) -> Ref<'_, BytesReader> {
+        self._io.borrow()
+    }
+}
+
+/**
+ * one scene = 8 pattern-chain entries (stride 0x28 = 8*4 + 8 pad bytes)
+ */
+
+#[derive(Default, Debug, Clone)]
+pub struct NcsSession_Scene {
+    pub _root: SharedType<NcsSession>,
+    pub _parent: SharedType<NcsSession>,
+    pub _self: SharedType<Self>,
+    pattern_chains: RefCell<Vec<OptRc<NcsSession_ChainEntry>>>,
+    scene_pad: RefCell<Vec<u8>>,
+    _io: RefCell<BytesReader>,
+}
+impl KStruct for NcsSession_Scene {
+    type Root = NcsSession;
+    type Parent = NcsSession;
+
+    fn read<S: KStream>(
+        self_rc: &OptRc<Self>,
+        _io: &S,
+        _root: SharedType<Self::Root>,
+        _parent: SharedType<Self::Parent>,
+    ) -> KResult<()> {
+        *self_rc._io.borrow_mut() = _io.clone();
+        self_rc._root.set(_root.get());
+        self_rc._parent.set(_parent.get());
+        self_rc._self.set(Ok(self_rc.clone()));
+        let _rrc = self_rc._root.get_value().borrow().upgrade();
+        let _prc = self_rc._parent.get_value().borrow().upgrade();
+        let _r = _rrc.as_ref().unwrap();
+        *self_rc.pattern_chains.borrow_mut() = Vec::new();
+        let l_pattern_chains = 8;
+        for _i in 0..l_pattern_chains {
+            let t = Self::read_into::<_, NcsSession_ChainEntry>(&*_io, Some(self_rc._root.clone()), None)?.into();
+            self_rc.pattern_chains.borrow_mut().push(t);
+        }
+        *self_rc.scene_pad.borrow_mut() = _io.read_bytes(8 as usize)?.into();
+        Ok(())
+    }
+}
+impl NcsSession_Scene {
+}
+impl NcsSession_Scene {
+    pub fn pattern_chains(&self) -> Ref<'_, Vec<OptRc<NcsSession_ChainEntry>>> {
+        self.pattern_chains.borrow()
+    }
+}
+impl NcsSession_Scene {
+    pub fn scene_pad(&self) -> Ref<'_, Vec<u8>> {
+        self.scene_pad.borrow()
+    }
+}
+impl NcsSession_Scene {
     pub fn _io(&self) -> Ref<'_, BytesReader> {
         self._io.borrow()
     }

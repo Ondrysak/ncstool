@@ -6,6 +6,11 @@
 //! trail. Fields whose sub-layout is not yet extracted are left as raw bytes and
 //! named `*_raw` so we never fake structure we haven't proven.
 
+// The typed model deliberately carries every decoded field for round-trip
+// fidelity (e.g. `automation`, `unknown_*` gaps) and geometry constants
+// (`TRACKS`/`PATTERNS`/`STEPS`) even where the CLI doesn't yet read them all.
+// These are load-bearing for correctness/serialization, not dead code.
+#![allow(dead_code)]
 use std::io;
 
 pub const FILE_SIZE: usize = 160_780;
@@ -193,6 +198,20 @@ pub struct TrackInfo {
     pub sidechain_preset: u8,
 }
 
+/// A scene/pattern chain entry: {start, end} indices + a u16 pad (must be 0).
+#[derive(Debug, Clone, Copy)]
+pub struct ChainEntry {
+    pub start: u8,
+    pub end: u8,
+    pub pad: u16,
+}
+
+/// One scene: 8 pattern-chain entries (one per track).
+#[derive(Debug, Clone)]
+pub struct Scene {
+    pub pattern_chains: [ChainEntry; 8],
+}
+
 #[cfg(test)]
 pub const SYNTH_TRACK_INFO_BASE: usize = 0xCD64; // test cross-check only
 
@@ -212,7 +231,10 @@ pub struct Session {
     pub midi_keyboard_octaves: [u8; 2],     // @0x26D10
     pub scale: Scale,
     pub fx: Fx,
-    // pending: scenes, chains, feature flags; per-pattern 36-byte gaps carried raw
+    pub scenes: Vec<Scene>,          // 16 @0x40
+    pub scene_chain: ChainEntry,     // @0x2C0
+    pub pattern_chains: [ChainEntry; 8], // @0x2C4
+    // feature-flag bytes in header + per-pattern 36-byte gaps: carried raw / not modeled
 }
 /// Shared range validation for a melodic block (synth or midi), pushing messages
 /// prefixed with `kind` into `v`. Ranges are the validator's: probability<=7,
@@ -270,6 +292,10 @@ fn conv_track_info(k: &crate::kaitai::ncs_session::NcsSession_TrackInfo) -> Trac
         mute_state: *k.mute_state(),
         sidechain_preset: *k.sidechain_preset(),
     }
+}
+
+fn conv_chain(k: &crate::kaitai::ncs_session::NcsSession_ChainEntry) -> ChainEntry {
+    ChainEntry { start: *k.start(), end: *k.end(), pad: *k.pad() }
 }
 
 fn conv_melodic(
@@ -400,6 +426,22 @@ impl Session {
         let file_size = *k.file_size().map_err(kerr)?;
         let scale = Scale { root: *k.scale_root().map_err(kerr)?, scale_type: *k.scale_type().map_err(kerr)? };
         let fx = Fx { delay_preset: *k.delay_preset().map_err(kerr)?, reverb_preset: *k.reverb_preset().map_err(kerr)? };
+        let scenes = {
+            let ks = k.scenes().map_err(kerr)?;
+            ks.iter().map(|sc| {
+                let pcs = sc.pattern_chains();
+                let mut arr = [ChainEntry { start: 0, end: 0, pad: 0 }; 8];
+                for (i, pc) in pcs.iter().enumerate() { arr[i] = conv_chain(pc); }
+                Scene { pattern_chains: arr }
+            }).collect()
+        };
+        let scene_chain = conv_chain(&*k.scene_chain().map_err(kerr)?);
+        let pattern_chains = {
+            let pc = k.pattern_chains().map_err(kerr)?;
+            let mut arr = [ChainEntry { start: 0, end: 0, pad: 0 }; 8];
+            for (i, e) in pc.iter().enumerate() { arr[i] = conv_chain(e); }
+            arr
+        };
         Ok(Session {
             file_size,
             timing,
@@ -413,6 +455,9 @@ impl Session {
             midi_keyboard_octaves,
             scale,
             fx,
+            scenes,
+            scene_chain,
+            pattern_chains,
         })
     }
 
@@ -493,6 +538,22 @@ impl Session {
             if c > 64 {
                 v.push(format!("default_drum_choices[{}] {} > 64", i, c));
             }
+        }
+        // scenes & chains (VERIFIED: start/end index bounds, pad==0, start<=end)
+        let chk_chain = |label: String, e: &ChainEntry, max: u8, v: &mut Vec<String>| {
+            if e.start > max { v.push(format!("{}.start {} > {}", label, e.start, max)); }
+            if e.end > max { v.push(format!("{}.end {} > {}", label, e.end, max)); }
+            if e.start > e.end { v.push(format!("{}.start {} > end {}", label, e.start, e.end)); }
+            if e.pad != 0 { v.push(format!("{}.pad {} != 0", label, e.pad)); }
+        };
+        for (si, scene) in self.scenes.iter().enumerate() {
+            for (ti, pc) in scene.pattern_chains.iter().enumerate() {
+                chk_chain(format!("scenes[{}].pattern_chains[{}]", si, ti), pc, 7, &mut v);
+            }
+        }
+        chk_chain("scene_chain".to_string(), &self.scene_chain, 15, &mut v);
+        for (ti, pc) in self.pattern_chains.iter().enumerate() {
+            chk_chain(format!("pattern_chains[{}]", ti), pc, 7, &mut v);
         }
         v
     }
@@ -1394,6 +1455,141 @@ mod tests {
         assert_eq!(
             deep.synth_track_info[1].sidechain_preset, raw[rec1 + 3],
             "synth_track_info[1].sidechain_preset must be raw byte at 0x{:X} (base + 8 + 3)", rec1 + 3
+        );
+    }
+
+    /// The newly-typed scenes + chains decode to the pinned geometry and satisfy
+    /// the validator's index bounds on both real files: 16 scenes, each carrying
+    /// 8 per-track pattern chains, plus 8 top-level pattern chains. Every scene
+    /// entry and every top-level pattern-chain entry stays within {start<=7,
+    /// end<=7, start<=end, pad==0}. The scene_chain heads are pinned to the exact
+    /// values the validator reports for each session (Deep 0..=2, Funk 0..=7), so
+    /// a shifted offset or wrong stride reddens here rather than silently.
+    #[test]
+    fn scenes_chains_decode_and_shape() {
+        for name in ["Deep.ncs", "Funk.ncs"] {
+            let s = Session::parse(&load(name)).expect("sample must parse");
+
+            assert_eq!(s.scenes.len(), 16, "{name} scene count");
+            assert_eq!(s.pattern_chains.len(), 8, "{name} top-level pattern_chains count");
+
+            for (si, scene) in s.scenes.iter().enumerate() {
+                assert_eq!(
+                    scene.pattern_chains.len(), 8,
+                    "{name} scenes[{si}] pattern_chains count"
+                );
+                for (ti, pc) in scene.pattern_chains.iter().enumerate() {
+                    assert!(
+                        pc.start <= 7 && pc.end <= 7 && pc.start <= pc.end && pc.pad == 0,
+                        "{name} scenes[{si}].pattern_chains[{ti}] out of range: {:?}", pc
+                    );
+                }
+            }
+            for (ti, pc) in s.pattern_chains.iter().enumerate() {
+                assert!(
+                    pc.start <= 7 && pc.end <= 7 && pc.start <= pc.end && pc.pad == 0,
+                    "{name} pattern_chains[{ti}] out of range: {:?}", pc
+                );
+            }
+        }
+
+        // scene_chain heads are pinned per-file (ChainEntry has no PartialEq, so
+        // compare the decoded (start, end, pad) triple).
+        let deep = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        let funk = Session::parse(&load("Funk.ncs")).expect("Funk.ncs must parse");
+        assert_eq!(
+            (deep.scene_chain.start, deep.scene_chain.end, deep.scene_chain.pad),
+            (0u8, 2u8, 0u16),
+            "Deep scene_chain (start,end,pad)"
+        );
+        assert_eq!(
+            (funk.scene_chain.start, funk.scene_chain.end, funk.scene_chain.pad),
+            (0u8, 7u8, 0u16),
+            "Funk scene_chain (start,end,pad)"
+        );
+    }
+
+    /// Regression guard for the newly-added scene/chain range checks: both real,
+    /// valid files must still validate() clean. If a scene/chain bound is decoded
+    /// wrong (or a check is too strict), one of these genuinely valid sessions
+    /// would report a spurious violation here.
+    #[test]
+    fn scenes_chains_validate_clean() {
+        for name in ["Deep.ncs", "Funk.ncs"] {
+            let session = Session::parse(&load(name)).expect("sample must parse");
+            let violations = session.validate();
+            assert!(
+                violations.is_empty(),
+                "{name} is a real valid session but validate() reported {} violation(s): {:?}",
+                violations.len(),
+                violations
+            );
+        }
+    }
+
+    /// Each newly-added scene/chain check fires for its own out-of-range value and
+    /// names the offending field. Every mutation starts from a fresh clean parse of
+    /// Deep.ncs so exactly one violation is provoked at a time -- proving each check
+    /// is independently wired (max 15 for scene_chain, 7 for the pattern chains),
+    /// not that some unrelated check fired.
+    #[test]
+    fn scene_chain_validation_reports_bad() {
+        // scene_chain.end past its max (15) -> reported naming scene_chain.
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.scene_chain.end = 16;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("scene_chain")),
+            "scene_chain.end=16 (> 15) must be reported naming 'scene_chain', got {:?}",
+            v
+        );
+
+        // scene_chain.pad nonzero -> reported naming scene_chain and pad.
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.scene_chain.pad = 1;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("scene_chain") && m.contains("pad")),
+            "scene_chain.pad=1 must be reported naming 'scene_chain' and 'pad', got {:?}",
+            v
+        );
+
+        // A top-level pattern_chains entry past its max (7) -> reported naming pattern_chains.
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.pattern_chains[0].start = 8;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("pattern_chains")),
+            "pattern_chains[0].start=8 (> 7) must be reported naming 'pattern_chains', got {:?}",
+            v
+        );
+
+        // A scene's pattern-chain entry past its max (7) -> reported naming scenes.
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.scenes[0].pattern_chains[0].start = 8;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("scenes")),
+            "scenes[0].pattern_chains[0].start=8 (> 7) must be reported naming 'scenes', got {:?}",
+            v
+        );
+    }
+
+    /// The start<=end invariant is checked independently of the index bounds: with
+    /// both endpoints in range (start=5, end=3, both <= 15) the only thing wrong is
+    /// their ordering, and validate() must still report a start>end violation naming
+    /// scene_chain. Guards against a check that only compares against `max` and
+    /// silently accepts a reversed range.
+    #[test]
+    fn scene_chain_start_gt_end_reported() {
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.scene_chain.start = 5;
+        sess.scene_chain.end = 3;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("scene_chain") && m.contains("> end")),
+            "scene_chain start=5 > end=3 (both <= 15) must be reported naming 'scene_chain' and the start>end violation, got {:?}",
+            v
         );
     }
 }

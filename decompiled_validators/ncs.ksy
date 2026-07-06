@@ -48,6 +48,24 @@ instances:
     pos: 0x3c
     type: u4
 
+  # ---- scenes & chains (VERIFIED: f_hu / f_cu / f_wt) ----
+  scenes:
+    pos: 0x40
+    type: scene
+    repeat: expr
+    repeat-expr: 16
+    doc: 16 scenes, each 8 pattern-chain entries {start,end<=7, pad==0}
+  scene_chain:
+    pos: 0x2c0
+    type: chain_entry
+    doc: session scene chain {start,end scene idx 0..15, pad==0}
+  pattern_chains:
+    pos: 0x2c4
+    type: chain_entry
+    repeat: expr
+    repeat-expr: 8
+    doc: 8 per-track pattern chains {start,end<=7, pad==0}
+
   # ---- drums: 4 planes, VERIFIED base/stride ----
   drums:
     pos: 0xcd74
@@ -122,6 +140,26 @@ instances:
     doc: per midi track; f_cn allowlist (range not asserted here)
 
 types:
+  # ---------- scenes & chains ----------
+  chain_entry:
+    doc: '{start, end, pad:u2==0}; start/end are pattern (0..7) or scene (0..15) indices'
+    seq:
+      - id: start
+        type: u1
+      - id: end
+        type: u1
+      - id: pad
+        type: u2
+        valid: 0
+  scene:
+    doc: one scene = 8 pattern-chain entries (stride 0x28 = 8*4 + 8 pad bytes)
+    seq:
+      - id: pattern_chains
+        type: chain_entry
+        repeat: expr
+        repeat-expr: 8
+      - id: scene_pad
+        size: 8
   # ---------- track info record (8-byte stride) ----------
   track_info:
     doc: 8-byte record; patch @+0, reserved +1, muteState @+2, sidechainPreset @+3, reserved +4..7
