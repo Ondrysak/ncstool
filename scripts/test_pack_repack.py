@@ -17,6 +17,12 @@ VELOCITY_OFF = 0x0CD74
 PROBABILITY_OFF = 0x0CD94
 TRACK_STRIDE = 0x3540
 PATTERN_STRIDE = 0x06A8
+DRUM_CHOICE_OFF = 0x0CDB4
+DRUM_RHYTHM_OFF = 0x0CDD4
+DEFAULT_DRUM_CHOICES_OFF = 0x1A278
+SYNTH_TRACK_INFO_OFF = 0x0CD64
+TRACK_INFO_STRIDE = 8
+STEPS = 32
 
 
 def project_offset(track, pattern, step):
@@ -48,6 +54,19 @@ class PackRepackCommandTests(unittest.TestCase):
             text=True,
             check=False,
         )
+
+    def write_generation_pack(self, path, index, project_entries=None):
+        entries = dict(project_entries or {"projects/project_0.ncs": self.deep})
+        for section in ("samples", "patches"):
+            for item in index.get(section, []):
+                entries[item["url"]] = f"{section}:{item['name']}".encode("utf-8")
+        self.write_pack(path, index, entries)
+
+    def project_step_bytes(self, project, base_offset, track, pattern=0):
+        return [
+            project[base_offset + project_offset(track, pattern, step)]
+            for step in range(STEPS)
+        ]
 
     def test_edit_updates_drum_step_velocity_and_probability_bytes_without_touching_other_entries(self):
         src = self.work / "source.circuittrackspack"
@@ -146,6 +165,206 @@ class PackRepackCommandTests(unittest.TestCase):
         self.assertEqual(rewritten_index["projects"][1]["url"], "projects/project_1.ncs")
         self.assertEqual(rewritten_index["projects"][1]["name"], "Added Project")
         self.assertEqual(rewritten_index["samples"], index["samples"])
+
+    def test_generate_adds_missing_project_entry_updates_index_name_and_writes_project_bytes(self):
+        src = self.work / "source.circuittrackspack"
+        dst = self.work / "generated.circuittrackspack"
+        index = {
+            "projects": [
+                {"name": "Template", "url": "projects/project_0.ncs"},
+                {"name": "Empty slot", "url": "projects/project_1.ncs"},
+            ],
+            "samples": [
+                {"name": "Tight Kick", "url": "samples/kick.wav"},
+                {"name": "Real Snare", "url": "samples/snare.wav"},
+                {"name": "Closed Hat", "url": "samples/hat.wav"},
+                {"name": "Open Hat", "url": "samples/open_hat.wav"},
+            ],
+            "patches": [
+                {"name": "Sub Bass", "url": "patches/sub.syx"},
+                {"name": "Dream Pad", "url": "patches/pad.syx"},
+            ],
+        }
+        self.write_generation_pack(src, index)
+
+        result = self.run_repacker(
+            "generate",
+            src,
+            dst,
+            1,
+            "--template",
+            0,
+            "--name",
+            "Generated Slot",
+            "--style",
+            "techno",
+            "--seed",
+            99,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(src, "r") as original, zipfile.ZipFile(dst, "r") as generated:
+            self.assertNotIn("projects/project_1.ncs", original.namelist())
+            self.assertIn("projects/project_1.ncs", generated.namelist())
+            self.assertEqual(generated.read("projects/project_0.ncs"), self.deep)
+            self.assertEqual(generated.read("samples/kick.wav"), b"samples:Tight Kick")
+            generated_project = generated.read("projects/project_1.ncs")
+            rewritten_index = json.loads(generated.read("index.json"))
+
+        self.assertEqual(len(generated_project), FILE_SIZE)
+        self.assertNotEqual(generated_project, self.deep)
+        self.assertEqual(rewritten_index["projects"][0], index["projects"][0])
+        self.assertEqual(rewritten_index["projects"][1]["url"], "projects/project_1.ncs")
+        self.assertEqual(rewritten_index["projects"][1]["name"], "Generated Slot")
+        self.assertEqual(
+            generated_project[DEFAULT_DRUM_CHOICES_OFF : DEFAULT_DRUM_CHOICES_OFF + 4],
+            bytes([0, 1, 2, 3]),
+        )
+        self.assertEqual(generated_project[SYNTH_TRACK_INFO_OFF], 0)
+        self.assertEqual(generated_project[SYNTH_TRACK_INFO_OFF + TRACK_INFO_STRIDE], 1)
+
+    def test_generate_writes_categorized_choices_synth_patches_and_drum_pattern_bytes(self):
+        src = self.work / "source.circuittrackspack"
+        dst = self.work / "generated.circuittrackspack"
+        index = {
+            "projects": [{"name": "Template", "url": "projects/project_0.ncs"}],
+            "samples": [
+                {"name": "Texture", "url": "samples/texture.wav"},
+                {"name": "Tight Kick", "url": "samples/kick.wav"},
+                {"name": "Real Snare", "url": "samples/snare.wav"},
+                {"name": "Closed Hat", "url": "samples/hat.wav"},
+                {"name": "Open Hat", "url": "samples/open_hat.wav"},
+                {"name": "Ride Cymbal", "url": "samples/ride.wav"},
+            ],
+            "patches": [
+                {"name": "Initial Patch", "url": "patches/initial.syx"},
+                {"name": "Sub Bass", "url": "patches/sub.syx"},
+                {"name": "Dream Pad", "url": "patches/pad.syx"},
+                {"name": "Acid Lead", "url": "patches/lead.syx"},
+            ],
+        }
+        self.write_generation_pack(src, index)
+
+        result = self.run_repacker(
+            "generate",
+            src,
+            dst,
+            0,
+            "--style",
+            "techno",
+            "--seed",
+            1234,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with zipfile.ZipFile(dst, "r") as zf:
+            generated_project = zf.read("projects/project_0.ncs")
+
+        self.assertEqual(
+            generated_project[DEFAULT_DRUM_CHOICES_OFF : DEFAULT_DRUM_CHOICES_OFF + 4],
+            bytes([1, 2, 3, 4]),
+        )
+        self.assertEqual(generated_project[SYNTH_TRACK_INFO_OFF], 1)
+        self.assertEqual(generated_project[SYNTH_TRACK_INFO_OFF + TRACK_INFO_STRIDE], 2)
+
+        expected_hits_by_track = {
+            0: {0: 118, 8: 118, 16: 118, 24: 118},
+            1: {8: 112, 24: 112},
+            2: {step: (96 if step % 4 == 0 else 72) for step in range(0, STEPS, 2)},
+            3: {4: 90, 12: 90, 20: 90, 28: 90},
+        }
+        for track, expected_hits in expected_hits_by_track.items():
+            self.assertEqual(
+                self.project_step_bytes(generated_project, VELOCITY_OFF, track),
+                [expected_hits.get(step, 0) for step in range(STEPS)],
+            )
+            self.assertEqual(
+                self.project_step_bytes(generated_project, PROBABILITY_OFF, track),
+                [7 if step in expected_hits else 0 for step in range(STEPS)],
+            )
+            self.assertEqual(
+                self.project_step_bytes(generated_project, DRUM_RHYTHM_OFF, track),
+                [1 if step in expected_hits else 0 for step in range(STEPS)],
+            )
+            self.assertEqual(
+                self.project_step_bytes(generated_project, DRUM_CHOICE_OFF, track),
+                [255] * STEPS,
+            )
+
+    def test_generate_seed_is_deterministic_for_selection_and_project_output(self):
+        src = self.work / "source.circuittrackspack"
+        first = self.work / "first.circuittrackspack"
+        second = self.work / "second.circuittrackspack"
+        index = {
+            "projects": [
+                {"name": "Template", "url": "projects/project_0.ncs"},
+                {"name": "Empty slot", "url": "projects/project_1.ncs"},
+            ],
+            "samples": [
+                {"name": "Tight Kick A", "url": "samples/kick_a.wav"},
+                {"name": "Soft Kick B", "url": "samples/kick_b.wav"},
+                {"name": "Real Snare A", "url": "samples/snare_a.wav"},
+                {"name": "Clap Snare B", "url": "samples/snare_b.wav"},
+                {"name": "Closed Hat A", "url": "samples/hat_a.wav"},
+                {"name": "Bright Hat B", "url": "samples/hat_b.wav"},
+                {"name": "Open Hat A", "url": "samples/open_hat.wav"},
+                {"name": "Perc Ride B", "url": "samples/perc.wav"},
+            ],
+            "patches": [
+                {"name": "Sub Bass A", "url": "patches/sub_a.syx"},
+                {"name": "Acid Bass B", "url": "patches/acid_b.syx"},
+                {"name": "Warm Pad A", "url": "patches/pad_a.syx"},
+                {"name": "Bell Pad B", "url": "patches/pad_b.syx"},
+                {"name": "Lead Tone C", "url": "patches/lead_c.syx"},
+            ],
+        }
+        self.write_generation_pack(src, index)
+
+        first_result = self.run_repacker(
+            "generate",
+            src,
+            first,
+            1,
+            "--name",
+            "Seeded",
+            "--style",
+            "house",
+            "--seed",
+            2026,
+        )
+        second_result = self.run_repacker(
+            "generate",
+            src,
+            second,
+            1,
+            "--name",
+            "Seeded",
+            "--style",
+            "house",
+            "--seed",
+            2026,
+        )
+
+        self.assertEqual(first_result.returncode, 0, first_result.stderr)
+        self.assertEqual(second_result.returncode, 0, second_result.stderr)
+        self.assertEqual(
+            [
+                line
+                for line in first_result.stdout.splitlines()
+                if line.startswith("  drums:") or line.startswith("  synths:")
+            ],
+            [
+                line
+                for line in second_result.stdout.splitlines()
+                if line.startswith("  drums:") or line.startswith("  synths:")
+            ],
+        )
+        with zipfile.ZipFile(first, "r") as first_pack, zipfile.ZipFile(second, "r") as second_pack:
+            self.assertEqual(
+                first_pack.read("projects/project_1.ncs"),
+                second_pack.read("projects/project_1.ncs"),
+            )
+            self.assertEqual(first_pack.read("index.json"), second_pack.read("index.json"))
 
     def test_invalid_edit_spec_fails_without_creating_destination_pack(self):
         src = self.work / "source.circuittrackspack"

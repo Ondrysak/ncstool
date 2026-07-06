@@ -16,9 +16,9 @@ so normal builds do **not** require Java or Kaitai Struct Compiler.
 - **Browse `.circuittrackspack` files**: opens the pack ZIP, reads `index.json`,
   parses each present project, and resolves drum sample / synth patch indices to
   human-readable names.
-- **Repack `.circuittrackspack` files**: a focused Python writer can edit one
-  packed project or add/replace a project slot while preserving the rest of the
-  ZIP.
+- **Repack/generate `.circuittrackspack` files**: a focused Python writer can edit
+  one packed project, add/replace a project slot, or generate a coherent
+  drum-backed project from categorized samples and synth patches.
 - **Validator-derived parser**: all known validated regions are typed through
   Kaitai-generated Rust; unknown 36-byte per-pattern gaps are carried raw instead
   of guessed.
@@ -114,9 +114,28 @@ python3 scripts/pack_repack.py replace \
   --name "LLM Jam"
 ```
 
-Use this with an LLM by having the model emit `track:pattern:steps[:probability]`
-edits, applying them to a template session, then repacking the result into an
-empty or existing project slot.
+Generate a new coherent project from a template project inside the pack:
+
+```bash
+python3 scripts/pack_repack.py generate \
+  "DLR  Sofa Sound.circuittrackspack" \
+  "DLR  Sofa Sound generated.circuittrackspack" \
+  7 \
+  --template 6 \
+  --style jungle \
+  --seed 42 \
+  --name "LLM Jungle"
+```
+
+`generate` categorizes `samples[]` and `patches[]` by name, then writes:
+
+- `default_drum_choices` for kick/snare/hat/perc-or-open-hat tracks;
+- drum velocity/probability/choice/rhythm planes for all 8 generated patterns;
+- `synth_track_info.patch` for a bass-ish synth and a pad/lead-ish synth;
+- `index.json` project name.
+
+Use this with an LLM by having the model choose a style/seed/name, or by emitting
+explicit `track:pattern:steps[:probability]` edits for `edit` after generation.
 
 ## Drum pattern edit format
 
