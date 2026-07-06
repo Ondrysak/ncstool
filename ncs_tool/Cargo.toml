@@ -14,3 +14,7 @@ memmap2 = "0.9"
 # Kaitai Struct runtime for the generated NCS parser (src/kaitai/ncs_session.rs).
 # Pinned to an exact rev — regenerate the parser with `scripts/regen_kaitai.sh`.
 kaitai = { git = "https://github.com/kaitai-io/kaitai_struct_rust_runtime", rev = "99596131793229cdee71775e1b4c72f18467ef79" }
+# .circuittrackspack support: ZIP container + index.json manifest
+zip = { version = "2", default-features = false, features = ["deflate"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

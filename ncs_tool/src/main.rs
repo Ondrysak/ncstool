@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{self, Read};
 
 mod kaitai;
+mod pack;
 mod session;
 
 const TRACKS: usize = 4;
@@ -328,6 +329,7 @@ fn print_usage(prog: &str) {
     eprintln!("Usage:");
     eprintln!("  {} <file.ncs>                                  analyze a session", prog);
     eprintln!("  {} clone <src.ncs> <dst.ncs> \"t:p:steps[:prob]\" ...  edit drum patterns", prog);
+    eprintln!("  {} pack <file.circuittrackspack>               summarize a pack (resolves sample/patch names)", prog);
 }
 
 fn main() -> io::Result<()> {
@@ -341,6 +343,13 @@ fn main() -> io::Result<()> {
                 std::process::exit(2);
             }
             run_clone(&args[2], &args[3], &args[4..])
+        }
+        Some("pack") => {
+            if args.len() < 3 {
+                print_usage(prog);
+                std::process::exit(2);
+            }
+            pack::run_pack(&args[2])
         }
         Some(file) => run_analyze(file),
         None => {
