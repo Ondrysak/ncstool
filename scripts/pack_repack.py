@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import random
+import struct
 import tempfile
 import zipfile
 from dataclasses import dataclass
@@ -41,6 +42,9 @@ DRUM_RHYTHM_OFF = 0x0CDD4
 DEFAULT_DRUM_CHOICES_OFF = 0x1A278
 SYNTH_TRACK_INFO_OFF = 0x0CD64
 TRACK_INFO_STRIDE = 8
+PROJECT_NAME_LEN_OFF = 0x0C
+PROJECT_NAME_OFF = 0x10
+PROJECT_NAME_BYTES = 32
 VEL_LEVELS = [0, 14, 28, 42, 56, 70, 84, 98, 112, 127]
 
 
@@ -108,6 +112,17 @@ def parse_pattern_edit(spec: str) -> PatternEdit:
 def require_ncs(data: bytes | bytearray, label: str) -> None:
     if len(data) != FILE_SIZE:
         raise invalid(f"{label} is {len(data)} bytes; expected {FILE_SIZE} bytes")
+
+
+def set_project_display_name(data: bytearray, name: str) -> None:
+    require_ncs(data, "project session")
+    raw = name.encode("ascii")
+    if len(raw) > PROJECT_NAME_BYTES:
+        raise invalid(f"project name {name!r} is {len(raw)} bytes; max {PROJECT_NAME_BYTES}")
+    data[PROJECT_NAME_LEN_OFF:PROJECT_NAME_LEN_OFF + 4] = struct.pack("<I", len(raw))
+    data[PROJECT_NAME_OFF:PROJECT_NAME_OFF + PROJECT_NAME_BYTES] = (
+        raw + b" " * (PROJECT_NAME_BYTES - len(raw))
+    )
 
 
 def apply_pattern_edit(data: bytearray, edit: PatternEdit) -> None:
@@ -378,7 +393,7 @@ def command_replace(args: argparse.Namespace) -> None:
     src_pack = Path(args.src_pack)
     dst_pack = Path(args.dst_pack)
     session_path = Path(args.session)
-    session = session_path.read_bytes()
+    session = bytearray(session_path.read_bytes())
     require_ncs(session, str(session_path))
 
     with zipfile.ZipFile(src_pack, "r") as zf:
@@ -386,9 +401,11 @@ def command_replace(args: argparse.Namespace) -> None:
         url = project_url(index, args.project)
         existed = url in zf.namelist()
 
-    replacements: dict[str, bytes] = {url: session}
     if args.name is not None:
+        set_project_display_name(session, args.name)
         index["projects"][args.project]["name"] = args.name
+    replacements: dict[str, bytes] = {url: bytes(session)}
+    if args.name is not None:
         replacements["index.json"] = (json.dumps(index, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
     write_repacked(src_pack, dst_pack, replacements)
@@ -422,6 +439,7 @@ def command_generate(args: argparse.Namespace) -> None:
 
     selection, names = select_for_generation(index, args.style, args.seed)
     generate_project(project, selection, args.style)
+    set_project_display_name(project, name)
 
     index["projects"][args.project]["name"] = name
     index_json = (json.dumps(index, indent=2, ensure_ascii=False) + "\n").encode("utf-8")

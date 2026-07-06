@@ -23,6 +23,11 @@ DEFAULT_DRUM_CHOICES_OFF = 0x1A278
 SYNTH_TRACK_INFO_OFF = 0x0CD64
 TRACK_INFO_STRIDE = 8
 STEPS = 32
+PROJECT_NAME_LEN_OFF = 0x0C
+PROJECT_NAME_OFF = 0x10
+PROJECT_NAME_BYTES = 32
+PROJECT_NAME_FIELD_END = PROJECT_NAME_OFF + PROJECT_NAME_BYTES
+
 
 
 def project_offset(track, pattern, step):
@@ -67,6 +72,23 @@ class PackRepackCommandTests(unittest.TestCase):
             project[base_offset + project_offset(track, pattern, step)]
             for step in range(STEPS)
         ]
+
+    def assert_project_display_name(self, project, name):
+        raw = name.encode("ascii")
+        self.assertLessEqual(len(raw), PROJECT_NAME_BYTES)
+        self.assertEqual(
+            project[PROJECT_NAME_LEN_OFF : PROJECT_NAME_LEN_OFF + 4],
+            len(raw).to_bytes(4, "little"),
+        )
+        self.assertEqual(
+            project[PROJECT_NAME_OFF:PROJECT_NAME_FIELD_END],
+            raw + b" " * (PROJECT_NAME_BYTES - len(raw)),
+        )
+
+    def assert_project_bytes_match_except_display_name(self, project, expected):
+        self.assertEqual(project[:PROJECT_NAME_LEN_OFF], expected[:PROJECT_NAME_LEN_OFF])
+        self.assertEqual(project[PROJECT_NAME_FIELD_END:], expected[PROJECT_NAME_FIELD_END:])
+
 
     def test_edit_updates_drum_step_velocity_and_probability_bytes_without_touching_other_entries(self):
         src = self.work / "source.circuittrackspack"
@@ -156,7 +178,7 @@ class PackRepackCommandTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         with zipfile.ZipFile(dst, "r") as zf:
             self.assertIn("projects/project_1.ncs", zf.namelist())
-            self.assertEqual(zf.read("projects/project_1.ncs"), self.funk)
+            replaced_project = zf.read("projects/project_1.ncs")
             self.assertEqual(zf.read("projects/project_0.ncs"), self.deep)
             self.assertEqual(zf.read("samples/sample_0.wav"), sample_payload)
             rewritten_index = json.loads(zf.read("index.json"))
@@ -165,6 +187,11 @@ class PackRepackCommandTests(unittest.TestCase):
         self.assertEqual(rewritten_index["projects"][1]["url"], "projects/project_1.ncs")
         self.assertEqual(rewritten_index["projects"][1]["name"], "Added Project")
         self.assertEqual(rewritten_index["samples"], index["samples"])
+        self.assert_project_display_name(
+            replaced_project,
+            rewritten_index["projects"][1]["name"],
+        )
+        self.assert_project_bytes_match_except_display_name(replaced_project, self.funk)
 
     def test_generate_adds_missing_project_entry_updates_index_name_and_writes_project_bytes(self):
         src = self.work / "source.circuittrackspack"
@@ -216,6 +243,10 @@ class PackRepackCommandTests(unittest.TestCase):
         self.assertEqual(rewritten_index["projects"][0], index["projects"][0])
         self.assertEqual(rewritten_index["projects"][1]["url"], "projects/project_1.ncs")
         self.assertEqual(rewritten_index["projects"][1]["name"], "Generated Slot")
+        self.assert_project_display_name(
+            generated_project,
+            rewritten_index["projects"][1]["name"],
+        )
         self.assertEqual(
             generated_project[DEFAULT_DRUM_CHOICES_OFF : DEFAULT_DRUM_CHOICES_OFF + 4],
             bytes([0, 1, 2, 3]),
