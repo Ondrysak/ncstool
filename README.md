@@ -127,6 +127,10 @@ python3 scripts/pack_repack.py generate \
   --name "LLM Jungle"
 ```
 
+`--name` updates both `index.json` and the session header display name. Keep it
+ASCII and at most 13 bytes; the Novation validator constrains the header byte at
+0x0C to `0..13`.
+
 `generate` categorizes `samples[]` and `patches[]` by name, then writes:
 
 - `default_drum_choices` for kick/snare/hat/perc-or-open-hat tracks;
@@ -144,7 +148,7 @@ explicit `track:pattern:steps[:probability]` edits for `edit` after generation.
 - `track`: drum track `0..3`
 - `pattern`: pattern `0..7`
 - `steps`: up to 32 step characters
-- `probability`: optional single digit `0..9`; applied to played steps
+- `probability`: optional single digit `0..7`; applied to played steps
 
 ### Step characters
 
@@ -207,7 +211,8 @@ Circuit Tracks sessions. Remaining intentionally-unmodeled bytes:
 
 - per-pattern 36-byte gaps with no validator reads; carried raw for round-trip
   fidelity;
-- header feature-flag bytes not yet decoded into the typed model.
+- display-name/header semantics beyond the validator-checked signature,
+  file-size, feature-flags, and session-colour byte.
 
 The old exploratory Python drum extractor has been removed. The maintained
 parser/analyzer is Rust/Kaitai; Python is used only for the focused pack writer

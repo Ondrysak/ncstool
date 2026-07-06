@@ -222,7 +222,7 @@ class PackRepackCommandTests(unittest.TestCase):
             "--template",
             0,
             "--name",
-            "Generated Slot",
+            "Gen Slot",
             "--style",
             "techno",
             "--seed",
@@ -242,7 +242,7 @@ class PackRepackCommandTests(unittest.TestCase):
         self.assertNotEqual(generated_project, self.deep)
         self.assertEqual(rewritten_index["projects"][0], index["projects"][0])
         self.assertEqual(rewritten_index["projects"][1]["url"], "projects/project_1.ncs")
-        self.assertEqual(rewritten_index["projects"][1]["name"], "Generated Slot")
+        self.assertEqual(rewritten_index["projects"][1]["name"], "Gen Slot")
         self.assert_project_display_name(
             generated_project,
             rewritten_index["projects"][1]["name"],
@@ -281,6 +281,8 @@ class PackRepackCommandTests(unittest.TestCase):
             src,
             dst,
             0,
+            "--name",
+            "Gen Techno",
             "--style",
             "techno",
             "--seed",
@@ -396,6 +398,41 @@ class PackRepackCommandTests(unittest.TestCase):
                 second_pack.read("projects/project_1.ncs"),
             )
             self.assertEqual(first_pack.read("index.json"), second_pack.read("index.json"))
+
+    def test_edit_probability_accepts_7_and_rejects_8(self):
+        src = self.work / "source.circuittrackspack"
+        ok_dst = self.work / "probability_7.circuittrackspack"
+        bad_dst = self.work / "probability_8.circuittrackspack"
+        index = {"projects": [{"name": "Editable", "url": "projects/project_0.ncs"}]}
+        self.write_pack(src, index, {"projects/project_0.ncs": self.deep})
+
+        ok = self.run_repacker("edit", src, ok_dst, 0, "0:0:X:7")
+
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        with zipfile.ZipFile(ok_dst, "r") as zf:
+            edited_project = zf.read("projects/project_0.ncs")
+        step0 = project_offset(track=0, pattern=0, step=0)
+        self.assertEqual(edited_project[VELOCITY_OFF + step0], 127)
+        self.assertEqual(edited_project[PROBABILITY_OFF + step0], 7)
+
+        bad = self.run_repacker("edit", src, bad_dst, 0, "0:0:X:8")
+
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("probability 8 out of range 0..7", bad.stderr)
+        self.assertFalse(bad_dst.exists())
+
+    def test_replace_rejects_project_name_longer_than_thirteen_bytes_without_creating_pack(self):
+        src = self.work / "source.circuittrackspack"
+        dst = self.work / "too_long_name.circuittrackspack"
+        index = {"projects": [{"name": "Editable", "url": "projects/project_0.ncs"}]}
+        self.write_pack(src, index, {"projects/project_0.ncs": self.deep})
+
+        result = self.run_repacker("replace", src, dst, 0, FUNK_NCS, "--name", "Fourteen Chars")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("project name", result.stderr)
+        self.assertIn("max 13", result.stderr)
+        self.assertFalse(dst.exists())
 
     def test_invalid_edit_spec_fails_without_creating_destination_pack(self):
         src = self.work / "source.circuittrackspack"

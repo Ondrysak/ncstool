@@ -22,12 +22,28 @@ seq:
   # byte-exact tail boundaries not yet verified.
 
 instances:
-  # ---- header (VERIFIED: file size at +4) ----
+  # ---- header (VERIFIED: f_tu) ----
+  signature:
+    pos: 0
+    type: str
+    size: 4
+    encoding: ASCII
+    doc: accepts USER or DEMO
   file_size:
     pos: 4
     type: u4
+    valid: 160780
     doc: must equal 160780 (0x2740C); validated by f_tu
-
+  feature_flags:
+    pos: 0x08
+    type: u4
+    valid: 1
+    doc: bit 0 midiTracks set; reserved bits 1..31 clear
+  session_colour:
+    pos: 0x0c
+    type: u1
+    valid: { min: 0, max: 13 }
+    doc: validator string names sessionColour; byte also precedes the padded display-name area at 0x10
   # ---- timing (VERIFIED tempo range; others from main.rs) ----
   tempo:
     pos: 0x34
@@ -137,7 +153,7 @@ instances:
     type: u1
     repeat: expr
     repeat-expr: 2
-    doc: per midi track; f_cn allowlist (range not asserted here)
+    doc: per midi track; f_cn range 58..69 (samples use 64)
 
 types:
   # ---------- scenes & chains ----------
@@ -224,7 +240,7 @@ types:
         size: 192
         repeat: expr
         repeat-expr: 12
-        doc: 12 lanes x 192 bytes; values allowlist-checked by f_ms
+        doc: 12 lanes x 192 bytes; allowlist {0..127,255}; 255 = unset/no automation
 
   melodic_step:
     # 28 bytes per step, laid out: assigned_note_mask(+0), probability(+1),
@@ -253,16 +269,21 @@ types:
         repeat-expr: 6
 
   note:
+    doc: Active notes (mask bit set) validate noteNumber 1..139, gate 1..224, delay 0..5, velocity 0..127. Inactive slots may carry noteNumber 0.
     seq:
       - id: note_number
         type: u1
-        doc: 0 = empty, else MIDI note 1..139
+        valid: { min: 0, max: 139 }
+        doc: 0 = empty/inactive, else active note 1..139
       - id: gate
         type: u1
+        valid: { min: 0, max: 224 }
       - id: delay
         type: u1
+        valid: { min: 0, max: 5 }
       - id: velocity
         type: u1
+        valid: { min: 0, max: 127 }
 
   # ---------- drums ----------
   drum_block:
@@ -291,15 +312,28 @@ types:
     # 1704 bytes: 4 step planes (128) + tail. Tail offsets VERIFIED from validators
     # f_nr (playbackRange +128/+129 <=31), f_dr (syncRate +130 <=7),
     # f_uq (playbackDirection +131 <=3), f_lq (automation +168, 8 lanes x 192).
+    # f_vr validates: velocity<=127; played-hit probability<=7; drumChoice in
+    # {0..63,255}; rhythm is non-zero iff velocity is non-zero.
     seq:
       - id: velocity
-        size: 32
+        type: u1
+        repeat: expr
+        repeat-expr: 32
+        valid: { min: 0, max: 127 }
       - id: probability
-        size: 32
+        type: u1
+        repeat: expr
+        repeat-expr: 32
       - id: drum_choice
-        size: 32
+        type: u1
+        repeat: expr
+        repeat-expr: 32
+        doc: per-step drum sample; validator allowlist {0..63,255}, where 255 uses track default
       - id: drum_rhythm
-        size: 32
+        type: u1
+        repeat: expr
+        repeat-expr: 32
+        doc: non-zero iff velocity is non-zero; values validated against automation allowlist
       - id: playback_start
         type: u1
         valid: { min: 0, max: 31 }
@@ -319,4 +353,4 @@ types:
         size: 192
         repeat: expr
         repeat-expr: 8
-        doc: 8 lanes x 192 bytes; values checked against an allowlist by f_lq
+        doc: 8 lanes x 192 bytes; allowlist {0..127,255}; 255 = unset/no automation

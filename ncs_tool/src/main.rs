@@ -166,9 +166,9 @@ fn parse_pattern_edit(spec: &str) -> io::Result<PatternEdit> {
             let v: u8 = p
                 .trim()
                 .parse()
-                .map_err(|_| invalid_data(format!("invalid probability '{}': expected 0..9", p)))?;
-            if v > 9 {
-                return Err(invalid_data(format!("probability {} out of range 0..9", v)));
+                .map_err(|_| invalid_data(format!("invalid probability '{}': expected 0..7", p)))?;
+            if v > 7 {
+                return Err(invalid_data(format!("probability {} out of range 0..7", v)));
             }
             Some(v)
         }
@@ -262,16 +262,23 @@ fn run_analyze(file_path: &str) -> io::Result<()> {
         + (16 * 8 * 4) + 4 + (8 * 4)        // scenes + scene_chain + pattern_chains
         + (2 * (2 * 8 * melodic_pat))       // synth + midi patterns
         + (4 * 8 * drum_pat)                // drum patterns
-        + 4                                 // header file_size
+        + 13                                // header signature/file_size/feature_flags/session_colour
         + (2 * 3) + (2 * 3)                 // synth+midi track_info (3 stored bytes/track)
         + 4 + 4 + 2;                        // drum mutes + choices + octaves
     let total = data.len();
     println!(
-        "Parsed/carried bytes: {} / {} ({:.2}%) | fully typed via Kaitai: timing, scenes+chains, synth+midi(steps+tail)+track_info, drums(+tail)+mutes+choices, scale, fx, octaves, header; automation carried RAW; per-pattern 36B gaps + header feature-flags not counted",
+        "Parsed/carried bytes: {} / {} ({:.2}%) | fully typed via Kaitai: header, timing, scenes+chains, synth+midi(steps+tail)+track_info, drums(+tail)+mutes+choices, scale, fx, octaves; automation carried RAW; per-pattern 36B gaps not counted",
         known, total, (known as f64) * 100.0 / (total.max(1) as f64)
     );
 
     // ---- typed header ----
+    println!(
+        "Header: signature={} file_size={} feature_flags={} session_colour={}",
+        String::from_utf8_lossy(&sess.signature),
+        sess.file_size,
+        sess.feature_flags,
+        sess.session_colour
+    );
     let t = &sess.timing;
     println!("Timing: tempo={} swing={} swing_sync_rate={} spare1={} spare2={}",
              t.tempo, t.swing, t.swing_sync_rate, t.spare1, t.spare2);
@@ -319,6 +326,16 @@ fn run_analyze(file_path: &str) -> io::Result<()> {
             } else {
                 println!("{}", label);
             }
+        }
+    }
+
+    let violations = sess.validate();
+    if violations.is_empty() {
+        println!("\nValidation: ok");
+    } else {
+        println!("\nValidation: {} issue(s)", violations.len());
+        for msg in violations.iter().take(10) {
+            println!("  - {}", msg);
         }
     }
 

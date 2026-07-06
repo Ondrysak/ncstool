@@ -178,13 +178,13 @@ impl DrumData {
 #[derive(Debug, Clone, Copy)]
 pub struct Scale {
     pub root: u8,       // VERIFIED 0..11
-    pub scale_type: u8, // inferred 0..15
+    pub scale_type: u8, // VERIFIED 0..15
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Fx {
     pub delay_preset: u8,  // VERIFIED 0..15
-    pub reverb_preset: u8, // inferred 0..7
+    pub reverb_preset: u8, // VERIFIED 0..7
 }
 
 // ---------------- track info + global scalars ----------------
@@ -219,7 +219,10 @@ pub const SYNTH_TRACK_INFO_BASE: usize = 0xCD64; // test cross-check only
 
 #[derive(Debug, Clone)]
 pub struct Session {
+    pub signature: [u8; 4],           // header @+0, USER or DEMO
     pub file_size: u32,               // header @+4 (must equal 160780)
+    pub feature_flags: u32,           // header @+8, must equal 1
+    pub session_colour: u8,           // header @+0x0C, 0..13
     pub timing: Timing,
     pub synth: SynthData,
     pub midi: MidiData,
@@ -228,17 +231,18 @@ pub struct Session {
     pub midi_track_info: [TrackInfo; 2],    // @0x26CFC
     pub drum_mute_states: [u8; 4],          // @0x1A274, 0..1
     pub default_drum_choices: [u8; 4],      // @0x1A278, 0..64
-    pub midi_keyboard_octaves: [u8; 2],     // @0x26D10
+    pub midi_keyboard_octaves: [u8; 2],     // @0x26D10, 58..69
     pub scale: Scale,
     pub fx: Fx,
     pub scenes: Vec<Scene>,          // 16 @0x40
     pub scene_chain: ChainEntry,     // @0x2C0
     pub pattern_chains: [ChainEntry; 8], // @0x2C4
-    // feature-flag bytes in header + per-pattern 36-byte gaps: carried raw / not modeled
+    // per-pattern 36-byte gaps: carried raw / not modeled
 }
 /// Shared range validation for a melodic block (synth or midi), pushing messages
 /// prefixed with `kind` into `v`. Ranges are the validator's: probability<=7,
-/// note_mask<=63, active-note gate/velocity<=127, note_number 0 or 1..=139.
+/// note_mask<=63, active-note note_number 1..=139, gate 1..=224,
+/// delay<=5, velocity<=127, and automation bytes in {0..=127,255}.
 fn validate_melodic(kind: &str, tracks: &[MelodicTrack], v: &mut Vec<String>) {
     for (ti, track) in tracks.iter().enumerate() {
         for (pi, pat) in track.patterns.iter().enumerate() {
@@ -251,14 +255,17 @@ fn validate_melodic(kind: &str, tracks: &[MelodicTrack], v: &mut Vec<String>) {
                 }
                 for (ni, note) in step.notes.iter().enumerate() {
                     if (step.note_mask >> ni) & 1 == 1 {
-                        if note.gate > 127 {
-                            v.push(format!("{}[{}][{}].step[{}].note[{}].gate {} > 127", kind, ti, pi, si, ni, note.gate));
+                        if !(1..=139).contains(&note.note_number) {
+                            v.push(format!("{}[{}][{}].step[{}].note[{}].note_number {} not 1..=139", kind, ti, pi, si, ni, note.note_number));
+                        }
+                        if !(1..=224).contains(&note.gate) {
+                            v.push(format!("{}[{}][{}].step[{}].note[{}].gate {} not 1..=224", kind, ti, pi, si, ni, note.gate));
+                        }
+                        if note.delay > 5 {
+                            v.push(format!("{}[{}][{}].step[{}].note[{}].delay {} > 5", kind, ti, pi, si, ni, note.delay));
                         }
                         if note.velocity > 127 {
                             v.push(format!("{}[{}][{}].step[{}].note[{}].velocity {} > 127", kind, ti, pi, si, ni, note.velocity));
-                        }
-                        if note.note_number != 0 && !(1..=139).contains(&note.note_number) {
-                            v.push(format!("{}[{}][{}].step[{}].note[{}].note_number {} not 0 or 1..=139", kind, ti, pi, si, ni, note.note_number));
                         }
                     }
                 }
@@ -275,6 +282,13 @@ fn validate_melodic(kind: &str, tracks: &[MelodicTrack], v: &mut Vec<String>) {
             }
             if pat.playback_direction > 3 {
                 v.push(format!("{}[{}][{}].playback_direction {} > 3", kind, ti, pi, pat.playback_direction));
+            }
+            for (lane, values) in pat.automation.iter().enumerate() {
+                for (idx, &value) in values.iter().enumerate() {
+                    if value > 127 && value != 255 {
+                        v.push(format!("{}[{}][{}].automation[{}][{}] {} not in 0..=127 or 255", kind, ti, pi, lane, idx, value));
+                    }
+                }
             }
         }
     }
@@ -392,6 +406,9 @@ impl Session {
         let reader = BytesReader::from(d);
         let k: kaitai::OptRc<K> = K::read_into(&reader, None, None)
             .map_err(|e| err(&format!("kaitai parse failed: {:?}", e)))?;
+        let signature = [d[0], d[1], d[2], d[3]];
+        let feature_flags = u32::from_le_bytes([d[8], d[9], d[10], d[11]]);
+        let session_colour = d[0x0c];
 
         let synth = conv_melodic(&*k.synth().map_err(kerr)?)?;
         let midi = conv_melodic(&*k.midi().map_err(kerr)?)?;
@@ -443,7 +460,10 @@ impl Session {
             arr
         };
         Ok(Session {
+            signature,
             file_size,
+            feature_flags,
+            session_colour,
             timing,
             synth: SynthData { tracks: synth },
             midi: MidiData { tracks: midi },
@@ -477,15 +497,31 @@ impl Session {
         }
         validate_melodic("synth", &self.synth.tracks, &mut v);
         validate_melodic("midi", &self.midi.tracks, &mut v);
-        // Drum planes: velocity is a 7-bit MIDI value (0..=127). This is the plane
-        // `clone` edits, so the gate must cover it. (drumChoice/drumRhythm ranges
-        // not yet extracted from the validator -> not asserted here.)
+        // Drum planes: velocity is 0..=127; probability is 0..=7 on played hits;
+        // drumChoice uses the validator allowlist {0..=63,255}; drumRhythm must
+        // be non-zero exactly when velocity is non-zero.
         for (ti, track) in self.drums.tracks.iter().enumerate() {
             for (pi, pat) in track.patterns.iter().enumerate() {
                 for (si, step) in pat.steps.iter().enumerate() {
                     if step.velocity > 127 {
                         v.push(format!(
                             "drum[{}][{}].step[{}].velocity {} > 127", ti, pi, si, step.velocity));
+                    }
+                    if step.velocity > 0 && step.probability > 7 {
+                        v.push(format!(
+                            "drum[{}][{}].step[{}].probability {} > 7", ti, pi, si, step.probability));
+                    }
+                    if step.choice > 63 && step.choice != 255 {
+                        v.push(format!(
+                            "drum[{}][{}].step[{}].choice {} not in 0..=63 or 255", ti, pi, si, step.choice));
+                    }
+                    if step.velocity > 0 && step.rhythm == 0 {
+                        v.push(format!(
+                            "drum[{}][{}].step[{}].rhythm 0 while velocity is non-zero", ti, pi, si));
+                    }
+                    if step.velocity == 0 && step.rhythm != 0 {
+                        v.push(format!(
+                            "drum[{}][{}].step[{}].rhythm {} while velocity is zero", ti, pi, si, step.rhythm));
                     }
                 }
                 // per-pattern tail (VERIFIED ranges)
@@ -501,11 +537,33 @@ impl Session {
                 if pat.playback_direction > 3 {
                     v.push(format!("drum[{}][{}].playback_direction {} > 3", ti, pi, pat.playback_direction));
                 }
+                for (lane, values) in pat.automation.iter().enumerate() {
+                    for (idx, &value) in values.iter().enumerate() {
+                        if value > 127 && value != 255 {
+                            v.push(format!("drum[{}][{}].automation[{}][{}] {} not in 0..=127 or 255", ti, pi, lane, idx, value));
+                        }
+                    }
+                }
             }
         }
         // header + track info + global scalars (VERIFIED ranges)
+        if self.signature != *b"USER" && self.signature != *b"DEMO" {
+            v.push(format!("header signature {:?} not USER or DEMO", self.signature));
+        }
         if self.file_size != FILE_SIZE as u32 {
             v.push(format!("header file_size {} != {}", self.file_size, FILE_SIZE));
+        }
+        if self.feature_flags != 1 {
+            v.push(format!("header feature_flags {} != 1", self.feature_flags));
+        }
+        if self.session_colour > 13 {
+            v.push(format!("header session_colour {} > 13", self.session_colour));
+        }
+        if self.scale.scale_type > 15 {
+            v.push(format!("scale.scale_type {} > 15", self.scale.scale_type));
+        }
+        if self.fx.reverb_preset > 7 {
+            v.push(format!("fx.reverb_preset {} > 7", self.fx.reverb_preset));
         }
         for (i, ti) in self.synth_track_info.iter().enumerate() {
             if ti.patch >= 128 {
@@ -537,6 +595,11 @@ impl Session {
         for (i, &c) in self.default_drum_choices.iter().enumerate() {
             if c > 64 {
                 v.push(format!("default_drum_choices[{}] {} > 64", i, c));
+            }
+        }
+        for (i, &oct) in self.midi_keyboard_octaves.iter().enumerate() {
+            if !(58..=69).contains(&oct) {
+                v.push(format!("midi_keyboard_octaves[{}] {} not in 58..=69", i, oct));
             }
         }
         // scenes & chains (VERIFIED: start/end index bounds, pad==0, start<=end)
@@ -641,30 +704,39 @@ mod tests {
         }
     }
 
-    /// For every mask-active note in Deep.ncs, gate and velocity are valid MIDI
-    /// (<= 127) and the note number is either empty (0) or a real pitch (1..=139).
+    /// For every mask-active note in both real sessions, the note bytes satisfy
+    /// the validator's active-note contract: note_number 1..=139, gate 1..=224,
+    /// delay <= 5, velocity <= 127. Inactive slots are intentionally ignored by
+    /// the validator, so this walks `active_notes()` rather than every raw slot.
     #[test]
     fn synth_active_notes_in_range() {
-        let deep = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
-        for (t, track) in deep.synth.tracks.iter().enumerate() {
-            for (p, pat) in track.patterns.iter().enumerate() {
-                for (s, step) in pat.steps.iter().enumerate() {
-                    for note in step.active_notes() {
-                        assert!(
-                            note.gate <= 127,
-                            "t{t} p{p} s{s} gate {} > 127",
-                            note.gate
-                        );
-                        assert!(
-                            note.velocity <= 127,
-                            "t{t} p{p} s{s} velocity {} > 127",
-                            note.velocity
-                        );
-                        assert!(
-                            note.note_number == 0 || (1..=139).contains(&note.note_number),
-                            "t{t} p{p} s{s} note_number {} not 0 or 1..=139",
-                            note.note_number
-                        );
+        for name in ["Deep.ncs", "Funk.ncs"] {
+            let session = Session::parse(&load(name)).expect("sample must parse");
+            for (t, track) in session.synth.tracks.iter().enumerate() {
+                for (p, pat) in track.patterns.iter().enumerate() {
+                    for (s, step) in pat.steps.iter().enumerate() {
+                        for note in step.active_notes() {
+                            assert!(
+                                (1..=139).contains(&note.note_number),
+                                "{name} synth t{t} p{p} s{s} active note_number {} not in 1..=139",
+                                note.note_number
+                            );
+                            assert!(
+                                (1..=224).contains(&note.gate),
+                                "{name} synth t{t} p{p} s{s} active gate {} not in 1..=224",
+                                note.gate
+                            );
+                            assert!(
+                                note.delay <= 5,
+                                "{name} synth t{t} p{p} s{s} active delay {} > 5",
+                                note.delay
+                            );
+                            assert!(
+                                note.velocity <= 127,
+                                "{name} synth t{t} p{p} s{s} active velocity {} > 127",
+                                note.velocity
+                            );
+                        }
                     }
                 }
             }
@@ -834,6 +906,78 @@ mod tests {
         );
     }
 
+    /// Active melodic note validation is keyed by note_mask: the mutated slot is
+    /// marked active each time, then one field is pushed just outside its mapped
+    /// validator range. The automation case uses the first invalid allowlist byte
+    /// (128: neither 0..=127 nor 255) and proves the melodic automation lanes are
+    /// validated, not merely shaped.
+    #[test]
+    fn melodic_active_note_and_automation_validation_reports_bad() {
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        let step = &mut sess.synth.tracks[0].patterns[0].steps[0];
+        step.note_mask = 1;
+        step.notes[0] = Note { note_number: 0, gate: 1, delay: 0, velocity: 1 };
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("synth") && m.contains("note_number")),
+            "active synth note_number=0 must be reported naming 'synth' and 'note_number', got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        let step = &mut sess.synth.tracks[0].patterns[0].steps[0];
+        step.note_mask = 1;
+        step.notes[0] = Note { note_number: 140, gate: 1, delay: 0, velocity: 1 };
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("synth") && m.contains("note_number")),
+            "active synth note_number=140 (> 139) must be reported naming 'synth' and 'note_number', got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        let step = &mut sess.synth.tracks[0].patterns[0].steps[0];
+        step.note_mask = 1;
+        step.notes[0] = Note { note_number: 60, gate: 0, delay: 0, velocity: 1 };
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("synth") && m.contains("gate")),
+            "active synth gate=0 must be reported naming 'synth' and 'gate', got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        let step = &mut sess.synth.tracks[0].patterns[0].steps[0];
+        step.note_mask = 1;
+        step.notes[0] = Note { note_number: 60, gate: 225, delay: 0, velocity: 1 };
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("synth") && m.contains("gate")),
+            "active synth gate=225 (> 224) must be reported naming 'synth' and 'gate', got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        let step = &mut sess.synth.tracks[0].patterns[0].steps[0];
+        step.note_mask = 1;
+        step.notes[0] = Note { note_number: 60, gate: 1, delay: 6, velocity: 1 };
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("synth") && m.contains("delay")),
+            "active synth delay=6 (> 5) must be reported naming 'synth' and 'delay', got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.midi.tracks[0].patterns[0].automation[0][0] = 128;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("midi") && m.contains("automation")),
+            "midi automation byte 128 must be reported naming 'midi' and 'automation', got {:?}",
+            v
+        );
+    }
+
     /// A drum step velocity past 127 is flagged, and the message identifies it as
     /// a drum-plane velocity (the plane `clone` edits).
     #[test]
@@ -845,6 +989,61 @@ mod tests {
         assert!(
             v.iter().any(|m| m.contains("drum") && m.contains("velocity")),
             "drum velocity=200 must be reported naming 'drum' and 'velocity', got {:?}",
+            v
+        );
+    }
+
+    /// Drum step validation covers the mapped probability/choice/rhythm coupling
+    /// and automation allowlist. Each mutation starts from a clean real session and
+    /// changes only the bytes needed to violate one observable contract.
+    #[test]
+    fn drum_step_and_automation_validation_reports_bad() {
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.drums.tracks[0].patterns[0].steps[0] =
+            DrumStep { velocity: 1, probability: 8, choice: 255, rhythm: 1 };
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("drum") && m.contains("probability")),
+            "played drum step probability=8 (> 7) must be reported naming 'drum' and 'probability', got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.drums.tracks[0].patterns[0].steps[0] =
+            DrumStep { velocity: 0, probability: 0, choice: 64, rhythm: 0 };
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("drum") && m.contains("choice")),
+            "drum choice=64 (not 0..=63 or 255) must be reported naming 'drum' and 'choice', got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.drums.tracks[0].patterns[0].steps[0] =
+            DrumStep { velocity: 1, probability: 7, choice: 255, rhythm: 0 };
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("drum") && m.contains("rhythm")),
+            "played drum step with rhythm=0 must be reported naming 'drum' and 'rhythm', got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.drums.tracks[0].patterns[0].steps[0] =
+            DrumStep { velocity: 0, probability: 0, choice: 255, rhythm: 1 };
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("drum") && m.contains("rhythm")),
+            "silent drum step with nonzero rhythm must be reported naming 'drum' and 'rhythm', got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.drums.tracks[0].patterns[0].automation[0][0] = 128;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("drum") && m.contains("automation")),
+            "drum automation byte 128 must be reported naming 'drum' and 'automation', got {:?}",
             v
         );
     }
@@ -1335,16 +1534,19 @@ mod tests {
         }
     }
 
-    /// The reverse-engineered scalar offsets (header file_size, synth/midi track
-    /// info records, drum mute/choice arrays, midi keyboard octaves) land on the
-    /// exact values these two real sessions carry. Deep pins every scalar; Funk
-    /// pins the fields the assignment specifies as distinct. A shifted base or a
-    /// wrong record stride would decode a different byte and redden here.
+    /// The reverse-engineered scalar offsets (header signature/file_size/
+    /// feature_flags/session_colour, synth/midi track info records, drum
+    /// mute/choice arrays, midi keyboard octaves) land on the exact values these
+    /// two real sessions carry. A shifted base or a wrong record stride would
+    /// decode a different byte and redden here.
     #[test]
     fn scalars_decode_on_samples() {
         let deep = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
 
+        assert_eq!(deep.signature, *b"USER", "Deep header signature");
         assert_eq!(deep.file_size, FILE_SIZE as u32, "Deep header file_size");
+        assert_eq!(deep.feature_flags, 1, "Deep header feature_flags");
+        assert_eq!(deep.session_colour, 4, "Deep header session_colour");
 
         assert_eq!(deep.synth_track_info[0].patch, 31, "Deep synth track0 patch");
         assert_eq!(deep.synth_track_info[1].patch, 43, "Deep synth track1 patch");
@@ -1358,8 +1560,12 @@ mod tests {
         assert_eq!(deep.midi_keyboard_octaves, [64, 64], "Deep midi keyboard octaves");
 
         let funk = Session::parse(&load("Funk.ncs")).expect("Funk.ncs must parse");
+        assert_eq!(funk.signature, *b"USER", "Funk header signature");
         assert_eq!(funk.file_size, FILE_SIZE as u32, "Funk header file_size");
+        assert_eq!(funk.feature_flags, 1, "Funk header feature_flags");
+        assert_eq!(funk.session_colour, 4, "Funk header session_colour");
         assert_eq!(funk.default_drum_choices, [48, 34, 58, 6], "Funk default drum choices");
+        assert_eq!(funk.midi_keyboard_octaves, [64, 64], "Funk midi keyboard octaves");
     }
 
     /// Regression guard for the newly-added scalar range checks (file_size,
@@ -1430,6 +1636,66 @@ mod tests {
             v.iter().any(|m| m.contains("file_size")),
             "file_size=123 (!= {}) must be reported naming 'file_size', got {:?}",
             FILE_SIZE, v
+        );
+    }
+
+    /// The newly mapped header/global scalar bounds each reject the first invalid
+    /// value outside their validator range and report the specific field. MIDI
+    /// octave is checked on both sides of its 58..=69 inclusive window.
+    #[test]
+    fn newly_mapped_scalar_validation_reports_bad() {
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.feature_flags = 2;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("feature_flags")),
+            "feature_flags=2 (!= 1) must be reported naming feature_flags, got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.session_colour = 14;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("session_colour")),
+            "session_colour=14 (> 13) must be reported naming session_colour, got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.scale.scale_type = 16;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("scale_type")),
+            "scale_type=16 (> 15) must be reported naming scale_type, got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.fx.reverb_preset = 8;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("reverb_preset")),
+            "reverb_preset=8 (> 7) must be reported naming reverb_preset, got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.midi_keyboard_octaves[0] = 57;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("midi_keyboard_octaves")),
+            "midi_keyboard_octaves[0]=57 (< 58) must be reported naming midi_keyboard_octaves, got {:?}",
+            v
+        );
+
+        let mut sess = Session::parse(&load("Deep.ncs")).expect("Deep.ncs must parse");
+        sess.midi_keyboard_octaves[1] = 70;
+        let v = sess.validate();
+        assert!(
+            v.iter().any(|m| m.contains("midi_keyboard_octaves")),
+            "midi_keyboard_octaves[1]=70 (> 69) must be reported naming midi_keyboard_octaves, got {:?}",
+            v
         );
     }
 

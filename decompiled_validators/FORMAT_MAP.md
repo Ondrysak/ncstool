@@ -22,7 +22,7 @@ File size constant in the validator: `0x2740C = 160780` — matches our samples 
 
 | # | file section              | decompile fn | status |
 |---|---------------------------|--------------|--------|
-| 1 | header + feature flags    | f_tu | **VERIFIED** file_size@+4==160780 (feature flags pending) |
+| 1 | header + feature flags    | f_tu | **VERIFIED** signature, size, flags==1, sessionColour<=13 |
 | 2 | timing                    | f_ku | **VERIFIED** offsets+ranges |
 | 3 | scenes (16×8)             | f_hu | **VERIFIED** start/end<=7, pad==0 (128/128) |
 | 4 | scene chain               | f_cu | **VERIFIED** start/end scene 0..15, pad==0 |
@@ -42,26 +42,33 @@ File size constant in the validator: `0x2740C = 160780` — matches our samples 
 | 28–30 | report helpers        | f_um,f_nm,f_km | n/a |
 | 31 | root orchestrator stub    | f_fm | n/a |
 
-**Parsed/carried: ~97.3%.** All 26 validators are now typed in the Kaitai spec
-(scenes/chains included). Remaining unmapped: per-pattern 36-byte gaps (no
-validator; carried raw) and the header feature-flag bytes. No legacy hand-rolled
-parser remains — the tool parses entirely via the Kaitai-generated code.
+**Parsed/carried: ~97.3%.** All validator-covered regions are typed in the
+Kaitai spec. Remaining unmapped bytes are the per-pattern 36-byte gaps (no
+validator; carried raw) and display-name/header semantics beyond the validated
+signature/file-size/feature-flags/sessionColour fields. No legacy hand-rolled
+parser remains — the tool parses via the Kaitai-generated code.
 
 ---
 
 ## VERIFIED offsets, geometry, ranges
+
+### Header (`f_tu`)
+`signature` @0x00 accepts `USER` or `DEMO`; `file_size` @0x04 must equal
+160780; `feature_flags` @0x08 must equal 1 (`midiTracks` bit set, reserved
+bits clear); byte @0x0C validates `<=13` and validator strings name it
+`sessionColour`.
 
 ### Timing (`f_ku`)
 Reads byte `a[52]` = **0x34**. Check `(tempo-40) & 255 <= 200` → **tempo ∈ [40,240]**.
 Matches `main.rs` (swing 0x35, swingSyncRate 0x36, spare1 0x38, spare2 0x3C).
 
 ### Scale (`f_tn`)
-Reads byte `a[158988]` = **0x26D0C** = scaleRoot, check `<= 11` → **root ∈ [0,11]**.
-scaleType follows (0x26D0D). Matches `main.rs`.
+Reads **0x26D0C** = scaleRoot, check `<= 11`; scaleType at **0x26D0D**
+checks `<=15`.
 
 ### FX (`f_ln`)
-Reads byte `a[158990]` = **0x26D0E** = delayPreset, check `<= 15` → **delay ∈ [0,15]**.
-reverbPreset at 0x26D0F. Matches `main.rs`.
+Reads **0x26D0E** = delayPreset, check `<= 15`; reverbPreset at **0x26D0F**
+checks `<=7`.
 
 ### Drum patterns — steps (`f_vr`)  ← explains our 4 planes
 Index formula (decompile line ~18970):
@@ -70,10 +77,11 @@ i = base + track*13632 + pattern*1704 + step;   // 0x3540, 0x6A8
 velocity_plane = i + 52596;                      // 0xCD74
 ```
 Loops: `step != 32`, `pattern != 8`, `track != 4` → **4×8×32**.
-Planes (from field strings, 0x20 apart, matching `main.rs`):
-velocity 0xCD74, probabilities 0xCD94, drumChoice 0xCDB4, drumRhythm(mask) 0xCDD4.
-Rule confirmed by strings: *"drum rhythm mask of zero when velocity is non-zero"*
-and *"non-zero drum rhythm when velocity is zero"* → mask and velocity are coupled.
+Planes: velocity 0xCD74, probabilities 0xCD94, drumChoice 0xCDB4,
+drumRhythm(mask) 0xCDD4. Ranges/rules from `f_vr`: velocity `0..127`;
+probability `0..7` on played hits; drumChoice allowlist `{0..63,255}`;
+drumRhythm is non-zero iff velocity is non-zero and uses the shared
+`{0..127,255}` allowlist.
 
 ### Synth patterns — steps (`f_qt`)  ← anchors the big pre-drum block
 Index formula (decompile line ~22115):
@@ -86,7 +94,7 @@ Step stride **0x1C (28 bytes)**. Per-step 28-byte record (byte offsets from `p+7
 - **+0 `assignedNoteMask`** (range 0..63) — the note loop bit-tests it: `q[740] >> note & 1`.
   VERIFIED against samples: mask bit-count == present-note count, 512/512.
 - **+1 `probability`** (range 0..7).
-- +2..3 reserved; **+4..27 = 6 notes × {noteNumber, gate, delay, velocity}** (4 bytes each).
+- +2..3 reserved; **+4..27 = 6 notes × {noteNumber, gate, delay, velocity}** (4 bytes each). Active notes validate noteNumber 1..139, gate 1..224, delay 0..5, velocity 0..127.
 
 > Earlier drafts had +0/+1 swapped (probability/mask). Corrected: `+740` is the
 > mask (it's what the note loop shifts), `+741` is probability.
@@ -99,11 +107,11 @@ Consistency: synth `0x2E4 + 2*0x6540 = 0xCD64` (before drums 0xCD74). ✓
 
 ---
 
-## FIELD SCHEMA — field *names* VERIFIED (from validator symbols); per-field byte offsets PENDING
+## FIELD SCHEMA — field names and offsets VERIFIED where listed
 
 These are the exact C++ field names embedded in the validator
-(`validator::Session::Data`). They tell us *what* every region contains; the
-precise intra-struct byte offsets still need per-validator extraction.
+(`validator::Session::Data`). Conditional rules and allowlists that Kaitai cannot
+express directly are enforced by `Session::validate()`.
 
 ```
 header.signature, header.featureFlags.{midiTracks,reserved}
@@ -136,14 +144,15 @@ scaleRoot, scaleType, delayPreset, reverbPreset, midiKeyboardOctaves[track]
 ```
 
 ### Key structural revelations
-- **The per-pattern 1448-byte "tail"** our tool doesn't decode = `playbackRange`,
-  `syncRate`, `playbackDirection`, and **`automation[lane].values[]`**. The
-  `pitch/decay/distortion/eq` planes in `main.rs` are almost certainly **automation
-  lanes**, not real drum step fields — the validator defines no such drum fields.
+- **Per-pattern automation** is flat `automation[lane].values[]`: drums have
+  8 lanes × 192 bytes, synth/MIDI have 12 lanes × 192 bytes. The allowlist is
+  exactly `{0..127,255}`; `255` is the unset/no-automation sentinel. Lane target
+  labels remain unknown/ordinal.
+- **The old `pitch/decay/distortion/eq` drum plane names are gone.** Those bytes
+  overlap verified tail/automation data, not step fields.
 - **The ~51 KB pre-drum block** (0x2E4–0xCD64) = `synthPatterns` (2×8×32×6-note steps).
-- **The post-drum tail** (from ~0x19CCC) = `midiPatterns` + `midiTrackInfo`, then the
-  global scalars (scale 0x26D0C, fx 0x26D0E, octaves). NOTE: scale/fx live *inside*
-  this tail; midiPatterns does not own the whole range — sub-boundaries PENDING.
+- **The post-drum tail** = MIDI patterns at 0x1A27C, MIDI track info at 0x26CFC,
+  then scale/fx/octaves at 0x26D0C..0x26D11.
 
 ---
 
@@ -154,51 +163,19 @@ Ghidra 12.0 + the wasm plugin — language auto-detects as `Wasm:LE:32`).
 
 ---
 
-## HOW TO CONTINUE — proposed plan
+## HOW TO CONTINUE
 
-The validator gives us a ground-truth oracle: it read every offset we already
-use and confirmed them exactly. The path from ~3% → near-total coverage is now
-mechanical, not speculative. Proposed phases (each independently shippable):
+The regular validator-covered layout is now modeled. Remaining useful work:
 
-### Phase A — extract every remaining offset/range from the decompile (no device needed)
-For each PENDING validator (synth B–E, synth_track_info, drum B–E, drum_mute,
-default_drum_choices, midi A–E, midi_track_info, octaves, header, scenes,
-chains), read its index formula + comparison constants exactly as done for
-`f_ku`/`f_vr`/`f_qt`/`f_tn`/`f_ln`. Output: a machine-readable `offsets.toml`
-(base, strides, per-field offset, valid range) covering the whole file.
-*Deliverable:* `offsets.toml` + fill in every "PENDING" above.
-
-### Phase B — decode synth + MIDI patterns in `ncs_tool` (the ~105 KB of unknowns)
-Add `SynthData`/`MidiData` parsers using Phase-A geometry
-(synth: 2×8×32 steps, 6 notes/step, step stride 0x1C, base 0x2E4;
-midi: same shape, base TBD in tail). Parse `stepInfo{assignedNoteMask,
-probability}` + `notes[]{noteNumber,gate,delay,velocity}`. Extend the ASCII
-view to synth/midi note rows.
-*Deliverable:* analyze output covers synth+midi; coverage metric jumps.
-
-### Phase C — decode the per-pattern tail (playbackRange, syncRate, direction, automation)
-Reinterpret the misnamed `pitch/decay/distortion/eq` planes as automation lanes;
-add `playbackRange/syncRate/playbackDirection`. This closes the 1448-byte
-per-pattern gap across drums *and* synth/midi.
-*Deliverable:* per-pattern coverage ~100%; drop the bogus plane names.
-
-### Phase D — turn the validator into our test oracle
-Port each validator's range check into `ncs_tool` as a `validate` subcommand,
-and add a golden test: our warnings MUST match the validator's verdict on
-`Deep.ncs`/`Funk.ncs`. Optionally run the real `validator.wasm` headless
-(wasmtime/node) to diff our output against Novation's, byte-for-byte.
-*Deliverable:* `ncs-tui validate file.ncs`; round-trip guarantee that edited
-files still pass Novation's validator (makes `clone` safe for device upload).
-
-### Phase E (optional) — Ghidra deep-dives where the decompile is murky
-`automation[lane].values[]` is a nested/variable structure; if wasm-decompile
-output is ambiguous, load `validator.wasm` into **Ghidra 12.0 + the wasm plugin**
-(setup below) for its stronger decompiler, or cross-check against the ARM
-firmware in `fw-v4486-re.gpr` (12.1.2).
-
-### Priority
-A → C → B → D. Phase A unblocks everything; Phase C is the highest coverage-per-
-effort (regular, repeats ×64 patterns); D makes `clone` trustworthy for uploads.
+1. Reconcile header/display-name semantics around byte 0x0C and the padded name
+   at 0x10 against Components/device behavior. The validator names byte 0x0C
+   `sessionColour` and constrains it to `0..13`; the pack helper also uses it as
+   the displayed-name length, so generated names are capped at 13 bytes.
+2. Identify the per-pattern 36-byte gaps (`melodic +900..+935`, drum +132..+167)
+   if firmware/UI behavior reveals a semantic owner. The validator does not read
+   them, so they are carried raw.
+3. Add a dedicated CLI `validate` command if users need validation without the
+   full analyze dump. `Session::validate()` already contains the typed subset.
 
 ---
 

@@ -14,6 +14,12 @@ file_size = 160780
 
 # ============================ VERIFIED ============================
 
+[verified.header]        # validator f_tu
+signature = 0x00         # accepts "USER" or "DEMO"
+file_size = 0x04         # u32 must equal 160780
+feature_flags = 0x08     # u32 must equal 1 (midiTracks bit set; reserved clear)
+session_colour = 0x0C    # u8 range 0..13; followed by padded display-name bytes at 0x10
+
 [verified.timing]        # validator f_ku: reads a[0x34]; (tempo-40)&255<=200
 tempo = 0x34             # range 40..240  (VERIFIED read + range)
 
@@ -62,11 +68,12 @@ automation_lane_len = 192 # allowlist-checked, not a simple range
 # closure: 896 + 2 + 1 + 1 + 36 + 12*192 = 3240 == pattern_stride
 
 [verified.drum_patterns]   # validator f_vr: base+track*13632+pattern*1704+step, plane @+52596
-velocity     = 0xCD74    # VERIFIED (index formula matches validator exactly)
+velocity     = 0xCD74    # range 0..127
+probability  = 0xCD94    # checked on played hits only: 0..7
+drum_choice  = 0xCDB4    # allowlist {0..63,255}; 255 = use track default choice
+drum_rhythm  = 0xCDD4    # nonzero iff velocity is nonzero; allowlist {0..127,255}
 track_stride = 0x3540
 pattern_stride = 0x6A8   # 4 tracks x 8 patterns x 32 steps
-# rhythm/velocity coupling VERIFIED by validator strings (0<->0, nonzero<->nonzero)
-
 [verified.drum_pattern_tail]  # per-pattern, offsets relative to velocity plane base (0xCD74)
 # validators f_nr/f_dr/f_uq/f_lq — per-pattern (track x pattern loops, no step loop)
 playback_start     = 128  # +128 (0xCDF4), range 0..31  (f_nr reads +128 and +129)
@@ -75,29 +82,29 @@ sync_rate          = 130  # +130, range 0..7            (f_dr)
 playback_direction = 131  # +131, range 0..3            (f_uq)
 unknown_gap        = 132  # +132..+167 (36 bytes) — NO validator, carried raw
 automation_base    = 168  # +168; f_lq: 8 lanes x 192 bytes = 1536, ends at +1703
-automation_lanes   = 8
-automation_lane_len = 192 # values checked against an allowlist table, not a range
+automation_lane_len = 192 # allowlist {0..127,255}; 255 = unset/no automation
 # NOTE: this supersedes main.rs's old pitch/decay/distortion/eq "planes" at
 # +128/+160/+192/+224 — those were NOT step planes; they overlap this tail.
 
-[verified.scale]         # validator f_tn: reads a[0x26D0C], <=11
-root = 0x26D0C           # range 0..11  (VERIFIED read + range)
+[verified.scale]         # validator f_tn
+root = 0x26D0C           # range 0..11
+scale_type = 0x26D0D     # range 0..15
 
-[verified.fx]            # validator f_ln: reads a[0x26D0E], <=15
-delay_preset = 0x26D0E   # range 0..15  (VERIFIED read + range)
+[verified.fx]            # validator f_ln
+delay_preset = 0x26D0E   # range 0..15
+reverb_preset = 0x26D0F  # range 0..7
 
-# ======================== INFERRED (from main.rs; sample-consistent) ========================
+[verified.track_info]    # validators f_ds / f_yn
+synth_base = 0xCD64      # 2 records, stride 8; patch 0..127, mute 0..1, sidechain 0..7
+midi_base = 0x26CFC      # 2 records, stride 8; patch 0..7, mute 0..1, sidechain 0..7
+record_stride = 8
 
-[inferred.timing]
-swing      = 0x35        # range 20..80  (validator strings exist; range not re-derived here)
-swing_sync = 0x36        # range 0..7
-spare1     = 0x38        # u32 must be 0
-spare2     = 0x3C        # u32 must be 0
+[verified.drum_state]    # validators f_aq / f_pp
+drum_mute_states = 0x1A274      # 4 bytes, range 0..1
+default_drum_choices = 0x1A278  # 4 bytes, range 0..64
 
-[inferred.drum_planes]   # 0x20 apart; names from validator strings, offsets from main.rs
-probability = 0xCD94
-drum_choice = 0xCDB4
-drum_rhythm = 0xCDD4
+[verified.midi_keyboard_octaves]  # validator f_cn
+base = 0x26D10            # 2 bytes, range 58..69
 
 [verified.scenes]        # validator f_hu — VERIFIED 128/128 on both samples
 base = 0x40              # 16 scenes x 8 pattern-chain entries {start,end<=7,pad==0}
@@ -111,17 +118,17 @@ pattern_chain_base = 0x2C4  # 8 entries {start,end<=7, pad==0}
 pattern_chain_stride = 4
 pattern_chain_count  = 8
 
-[inferred.scale_fx_extra]
-scale_type    = 0x26D0D  # range 0..15
-reverb_preset = 0x26D0F  # range 0..7
+# ======================== INFERRED (sample-consistent) ========================
 
-# ============================ PENDING (validator known, offsets not extracted) ============================
-# f_kt/f_ft/f_xs/f_ms  synth playbackRange / syncRate / playbackDirection / automation
-# f_ds                 synth_track_info {patch, muteState, sidechainPreset}
-# f_nr/f_dr/f_uq/f_lq   drum  playbackRange / syncRate / direction / automation (per-pattern tail)
-# f_aq / f_pp          drum mute states / default drum choices
-# f_ep f_yo f_qo f_ho f_do   midi patterns (same shape as synth: stepInfo + 6 notes)
-# f_yn                 midi_track_info ; f_cn midi keyboard octaves ; f_tu header/signature/featureFlags
+[inferred.timing]
+swing      = 0x35        # range 20..80  (validator strings exist; range not re-derived here)
+swing_sync = 0x36        # range 0..7
+spare1     = 0x38        # u32 must be 0
+spare2     = 0x3C        # u32 must be 0
+# Remaining work: header display-name semantics, feature-flag/sessionColour naming
+# reconciliation, and the unvalidated 36-byte per-pattern gaps. All known validator
+# functions are represented in ncs.ksy; conditional/cross-field rules live in
+# Session::validate where Kaitai cannot express them cleanly.
 #
 # Extraction procedure (proven): read the validator fn -> get index formula + range check;
 # then confirm the offset against Deep.ncs/Funk.ncs by requiring ALL elements satisfy the

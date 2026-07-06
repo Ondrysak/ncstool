@@ -45,6 +45,7 @@ TRACK_INFO_STRIDE = 8
 PROJECT_NAME_LEN_OFF = 0x0C
 PROJECT_NAME_OFF = 0x10
 PROJECT_NAME_BYTES = 32
+PROJECT_NAME_LEN_MAX = 13
 VEL_LEVELS = [0, 14, 28, 42, 56, 70, 84, 98, 112, 127]
 
 
@@ -104,7 +105,7 @@ def parse_pattern_edit(spec: str) -> PatternEdit:
 
     probability: int | None = None
     if len(parts) == 4:
-        probability = parse_index(parts[3], 10, "probability")
+        probability = parse_index(parts[3], 8, "probability")
 
     return PatternEdit(track, pattern, velocities, probability)
 
@@ -117,8 +118,8 @@ def require_ncs(data: bytes | bytearray, label: str) -> None:
 def set_project_display_name(data: bytearray, name: str) -> None:
     require_ncs(data, "project session")
     raw = name.encode("ascii")
-    if len(raw) > PROJECT_NAME_BYTES:
-        raise invalid(f"project name {name!r} is {len(raw)} bytes; max {PROJECT_NAME_BYTES}")
+    if len(raw) > PROJECT_NAME_LEN_MAX:
+        raise invalid(f"project name {name!r} is {len(raw)} bytes; max {PROJECT_NAME_LEN_MAX}")
     data[PROJECT_NAME_LEN_OFF:PROJECT_NAME_LEN_OFF + 4] = struct.pack("<I", len(raw))
     data[PROJECT_NAME_OFF:PROJECT_NAME_OFF + PROJECT_NAME_BYTES] = (
         raw + b" " * (PROJECT_NAME_BYTES - len(raw))

@@ -33,6 +33,8 @@ pub struct NcsSession {
     drum_mute_states: RefCell<Vec<u8>>,
     f_drums: Cell<bool>,
     drums: RefCell<OptRc<NcsSession_DrumBlock>>,
+    f_feature_flags: Cell<bool>,
+    feature_flags: RefCell<u32>,
     f_file_size: Cell<bool>,
     file_size: RefCell<u32>,
     f_midi: Cell<bool>,
@@ -53,6 +55,10 @@ pub struct NcsSession {
     scene_chain: RefCell<OptRc<NcsSession_ChainEntry>>,
     f_scenes: Cell<bool>,
     scenes: RefCell<Vec<OptRc<NcsSession_Scene>>>,
+    f_session_colour: Cell<bool>,
+    session_colour: RefCell<u8>,
+    f_signature: Cell<bool>,
+    signature: RefCell<String>,
     f_swing: Cell<bool>,
     swing: RefCell<u8>,
     f_swing_sync_rate: Cell<bool>,
@@ -186,6 +192,30 @@ impl NcsSession {
     }
 
     /**
+     * bit 0 midiTracks set; reserved bits 1..31 clear
+     */
+    pub fn feature_flags(
+        &self
+    ) -> KResult<Ref<'_, u32>> {
+        let _io = self._io.borrow();
+        let _rrc = self._root.get_value().borrow().upgrade();
+        let _prc = self._parent.get_value().borrow().upgrade();
+        let _r = _rrc.as_ref().unwrap();
+        if self.f_feature_flags.get() {
+            return Ok(self.feature_flags.borrow());
+        }
+        self.f_feature_flags.set(true);
+        let _pos = _io.pos();
+        _io.seek(8 as usize)?;
+        *self.feature_flags.borrow_mut() = _io.read_u4le()?.into();
+        if !(((*self.feature_flags()? as u32) == (1 as u32))) {
+            return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::NotEqual, src_path: "/instances/feature_flags".to_string() }));
+        }
+        _io.seek(_pos)?;
+        Ok(self.feature_flags.borrow())
+    }
+
+    /**
      * must equal 160780 (0x2740C); validated by f_tu
      */
     pub fn file_size(
@@ -202,6 +232,9 @@ impl NcsSession {
         let _pos = _io.pos();
         _io.seek(4 as usize)?;
         *self.file_size.borrow_mut() = _io.read_u4le()?.into();
+        if !(((*self.file_size()? as i32) == (160780 as i32))) {
+            return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::NotEqual, src_path: "/instances/file_size".to_string() }));
+        }
         _io.seek(_pos)?;
         Ok(self.file_size.borrow())
     }
@@ -229,7 +262,7 @@ impl NcsSession {
     }
 
     /**
-     * per midi track; f_cn allowlist (range not asserted here)
+     * per midi track; f_cn range 58..69 (samples use 64)
      */
     pub fn midi_keyboard_octaves(
         &self
@@ -413,6 +446,54 @@ impl NcsSession {
         }
         _io.seek(_pos)?;
         Ok(self.scenes.borrow())
+    }
+
+    /**
+     * validator string names sessionColour; byte also precedes the padded display-name area at 0x10
+     */
+    pub fn session_colour(
+        &self
+    ) -> KResult<Ref<'_, u8>> {
+        let _io = self._io.borrow();
+        let _rrc = self._root.get_value().borrow().upgrade();
+        let _prc = self._parent.get_value().borrow().upgrade();
+        let _r = _rrc.as_ref().unwrap();
+        if self.f_session_colour.get() {
+            return Ok(self.session_colour.borrow());
+        }
+        self.f_session_colour.set(true);
+        let _pos = _io.pos();
+        _io.seek(12 as usize)?;
+        *self.session_colour.borrow_mut() = _io.read_u1()?.into();
+        if !(((*self.session_colour()? as u8) >= (0 as u8))) {
+            return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::LessThan, src_path: "/instances/session_colour".to_string() }));
+        }
+        if !(((*self.session_colour()? as u8) <= (13 as u8))) {
+            return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::GreaterThan, src_path: "/instances/session_colour".to_string() }));
+        }
+        _io.seek(_pos)?;
+        Ok(self.session_colour.borrow())
+    }
+
+    /**
+     * accepts USER or DEMO
+     */
+    pub fn signature(
+        &self
+    ) -> KResult<Ref<'_, String>> {
+        let _io = self._io.borrow();
+        let _rrc = self._root.get_value().borrow().upgrade();
+        let _prc = self._parent.get_value().borrow().upgrade();
+        let _r = _rrc.as_ref().unwrap();
+        if self.f_signature.get() {
+            return Ok(self.signature.borrow());
+        }
+        self.f_signature.set(true);
+        let _pos = _io.pos();
+        _io.seek(0 as usize)?;
+        *self.signature.borrow_mut() = bytes_to_str(&_io.read_bytes(4 as usize)?.into(), "ASCII")?;
+        _io.seek(_pos)?;
+        Ok(self.signature.borrow())
     }
     pub fn swing(
         &self
@@ -720,10 +801,32 @@ impl KStruct for NcsSession_DrumPattern {
         let _rrc = self_rc._root.get_value().borrow().upgrade();
         let _prc = self_rc._parent.get_value().borrow().upgrade();
         let _r = _rrc.as_ref().unwrap();
-        *self_rc.velocity.borrow_mut() = _io.read_bytes(32 as usize)?.into();
-        *self_rc.probability.borrow_mut() = _io.read_bytes(32 as usize)?.into();
-        *self_rc.drum_choice.borrow_mut() = _io.read_bytes(32 as usize)?.into();
-        *self_rc.drum_rhythm.borrow_mut() = _io.read_bytes(32 as usize)?.into();
+        *self_rc.velocity.borrow_mut() = Vec::new();
+        let l_velocity = 32;
+        for _i in 0..l_velocity {
+            self_rc.velocity.borrow_mut().push(_io.read_u1()?.into());
+            if !(((self_rc.velocity()[_i as usize] as u8) >= (0 as u8))) {
+                return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::LessThan, src_path: "/types/drum_pattern/seq/0".to_string() }));
+            }
+            if !(((self_rc.velocity()[_i as usize] as u8) <= (127 as u8))) {
+                return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::GreaterThan, src_path: "/types/drum_pattern/seq/0".to_string() }));
+            }
+        }
+        *self_rc.probability.borrow_mut() = Vec::new();
+        let l_probability = 32;
+        for _i in 0..l_probability {
+            self_rc.probability.borrow_mut().push(_io.read_u1()?.into());
+        }
+        *self_rc.drum_choice.borrow_mut() = Vec::new();
+        let l_drum_choice = 32;
+        for _i in 0..l_drum_choice {
+            self_rc.drum_choice.borrow_mut().push(_io.read_u1()?.into());
+        }
+        *self_rc.drum_rhythm.borrow_mut() = Vec::new();
+        let l_drum_rhythm = 32;
+        for _i in 0..l_drum_rhythm {
+            self_rc.drum_rhythm.borrow_mut().push(_io.read_u1()?.into());
+        }
         *self_rc.playback_start.borrow_mut() = _io.read_u1()?.into();
         if !(((*self_rc.playback_start() as u8) >= (0 as u8))) {
             return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::LessThan, src_path: "/types/drum_pattern/seq/4".to_string() }));
@@ -773,11 +876,19 @@ impl NcsSession_DrumPattern {
         self.probability.borrow()
     }
 }
+
+/**
+ * per-step drum sample; validator allowlist {0..63,255}, where 255 uses track default
+ */
 impl NcsSession_DrumPattern {
     pub fn drum_choice(&self) -> Ref<'_, Vec<u8>> {
         self.drum_choice.borrow()
     }
 }
+
+/**
+ * non-zero iff velocity is non-zero; values validated against automation allowlist
+ */
 impl NcsSession_DrumPattern {
     pub fn drum_rhythm(&self) -> Ref<'_, Vec<u8>> {
         self.drum_rhythm.borrow()
@@ -814,7 +925,7 @@ impl NcsSession_DrumPattern {
 }
 
 /**
- * 8 lanes x 192 bytes; values checked against an allowlist by f_lq
+ * 8 lanes x 192 bytes; allowlist {0..127,255}; 255 = unset/no automation
  */
 impl NcsSession_DrumPattern {
     pub fn automation(&self) -> Ref<'_, Vec<Vec<u8>>> {
@@ -1055,7 +1166,7 @@ impl NcsSession_MelodicPattern {
 }
 
 /**
- * 12 lanes x 192 bytes; values allowlist-checked by f_ms
+ * 12 lanes x 192 bytes; allowlist {0..127,255}; 255 = unset/no automation
  */
 impl NcsSession_MelodicPattern {
     pub fn automation(&self) -> Ref<'_, Vec<Vec<u8>>> {
@@ -1199,6 +1310,10 @@ impl NcsSession_MelodicTrack {
     }
 }
 
+/**
+ * Active notes (mask bit set) validate noteNumber 1..139, gate 1..224, delay 0..5, velocity 0..127. Inactive slots may carry noteNumber 0.
+ */
+
 #[derive(Default, Debug, Clone)]
 pub struct NcsSession_Note {
     pub _root: SharedType<NcsSession>,
@@ -1228,9 +1343,33 @@ impl KStruct for NcsSession_Note {
         let _prc = self_rc._parent.get_value().borrow().upgrade();
         let _r = _rrc.as_ref().unwrap();
         *self_rc.note_number.borrow_mut() = _io.read_u1()?.into();
+        if !(((*self_rc.note_number() as u8) >= (0 as u8))) {
+            return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::LessThan, src_path: "/types/note/seq/0".to_string() }));
+        }
+        if !(*self_rc.note_number() <= 139) {
+            return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::GreaterThan, src_path: "/types/note/seq/0".to_string() }));
+        }
         *self_rc.gate.borrow_mut() = _io.read_u1()?.into();
+        if !(((*self_rc.gate() as u8) >= (0 as u8))) {
+            return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::LessThan, src_path: "/types/note/seq/1".to_string() }));
+        }
+        if !(*self_rc.gate() <= 224) {
+            return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::GreaterThan, src_path: "/types/note/seq/1".to_string() }));
+        }
         *self_rc.delay.borrow_mut() = _io.read_u1()?.into();
+        if !(((*self_rc.delay() as u8) >= (0 as u8))) {
+            return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::LessThan, src_path: "/types/note/seq/2".to_string() }));
+        }
+        if !(((*self_rc.delay() as u8) <= (5 as u8))) {
+            return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::GreaterThan, src_path: "/types/note/seq/2".to_string() }));
+        }
         *self_rc.velocity.borrow_mut() = _io.read_u1()?.into();
+        if !(((*self_rc.velocity() as u8) >= (0 as u8))) {
+            return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::LessThan, src_path: "/types/note/seq/3".to_string() }));
+        }
+        if !(((*self_rc.velocity() as u8) <= (127 as u8))) {
+            return Err(KError::ValidationFailed(ValidationFailedError { kind: ValidationKind::GreaterThan, src_path: "/types/note/seq/3".to_string() }));
+        }
         Ok(())
     }
 }
@@ -1238,7 +1377,7 @@ impl NcsSession_Note {
 }
 
 /**
- * 0 = empty, else MIDI note 1..139
+ * 0 = empty/inactive, else active note 1..139
  */
 impl NcsSession_Note {
     pub fn note_number(&self) -> Ref<'_, u8> {
