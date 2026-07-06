@@ -16,6 +16,9 @@ so normal builds do **not** require Java or Kaitai Struct Compiler.
 - **Browse `.circuittrackspack` files**: opens the pack ZIP, reads `index.json`,
   parses each present project, and resolves drum sample / synth patch indices to
   human-readable names.
+- **Repack `.circuittrackspack` files**: a focused Python writer can edit one
+  packed project or add/replace a project slot while preserving the rest of the
+  ZIP.
 - **Validator-derived parser**: all known validated regions are typed through
   Kaitai-generated Rust; unknown 36-byte per-pattern gaps are carried raw instead
   of guessed.
@@ -85,6 +88,36 @@ and resolves:
 - `default_drum_choices` / drum choice indices -> `samples[]` names;
 - `synth_track_info.patch` indices -> `patches[]` names.
 
+### Repack a Circuit Tracks pack
+
+Pack writing is handled by `scripts/pack_repack.py`. It is intentionally narrow:
+Rust/Kaitai remains the parser/analyzer, and Python handles ZIP mutation.
+
+Edit drum patterns inside an existing packed project:
+
+```bash
+python3 scripts/pack_repack.py edit \
+  "DLR  Sofa Sound.circuittrackspack" \
+  "DLR  Sofa Sound edited.circuittrackspack" \
+  6 \
+  "0:0:X...X...X...X...:5"
+```
+
+Replace or add a project slot with an existing `.ncs`:
+
+```bash
+python3 scripts/pack_repack.py replace \
+  "DLR  Sofa Sound.circuittrackspack" \
+  "DLR  Sofa Sound expanded.circuittrackspack" \
+  7 \
+  my_new_project.ncs \
+  --name "LLM Jam"
+```
+
+Use this with an LLM by having the model emit `track:pattern:steps[:probability]`
+edits, applying them to a template session, then repacking the result into an
+empty or existing project slot.
+
 ## Drum pattern edit format
 
 `track:pattern:steps[:probability]`
@@ -123,6 +156,8 @@ Examples:
 - `decompiled_validators/README.md` — provenance and regeneration notes for the
   Novation validator artifact.
 - `scripts/regen_kaitai.sh` — regenerates the Rust parser from `ncs.ksy`.
+- `scripts/pack_repack.py` — Python pack writer for editing/replacing packed
+  projects.
 - `test_data/` — sample sessions used by tests.
 
 ## Development
@@ -155,5 +190,6 @@ Circuit Tracks sessions. Remaining intentionally-unmodeled bytes:
   fidelity;
 - header feature-flag bytes not yet decoded into the typed model.
 
-The main CLI is Rust-only. The old exploratory Python drum extractor has been
-removed so there is one maintained path through the Kaitai-backed parser.
+The old exploratory Python drum extractor has been removed. The maintained
+parser/analyzer is Rust/Kaitai; Python is used only for the focused pack writer
+where ZIP serialization is needed.

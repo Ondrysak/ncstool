@@ -15,6 +15,10 @@
 *.lcov
 /coverage/
 
+# Python helper/test cache
+__pycache__/
+*.py[cod]
+
 # Logs and temporary files
 *.log
 *.tmp
